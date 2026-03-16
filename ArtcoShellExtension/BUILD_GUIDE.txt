@@ -1,0 +1,91 @@
+================================================================================
+                    Artco Shell Extension 编译指南
+================================================================================
+
+功能说明
+--------
+此扩展会在 Windows 资源管理器的图片缩略图右下角显示格式标签，
+类似 2345 看图王的效果。
+
+支持的格式：
+  - PSD, PSB (蓝色标签)
+  - PNG, JPG, JPEG, GIF, BMP, WEBP (绿色标签)
+  - TIFF, TIF (紫色标签)
+  - RAW, CR2, NEF, ARW, DNG (橙色标签)
+  - ICO, SVG 等
+
+
+环境要求
+--------
+1. Visual Studio 2019 或更高版本
+   - 需要安装 ".NET 桌面开发" 工作负载
+   - 需要 .NET Framework 4.8 SDK
+
+2. 或者安装 Visual Studio Build Tools
+   下载地址: https://visualstudio.microsoft.com/downloads/
+   选择 "Build Tools for Visual Studio 2022"
+
+
+编译步骤
+--------
+
+方法一：使用 Visual Studio（推荐）
+1. 双击打开 ArtcoShellExtension.sln
+2. 在解决方案资源管理器中右键项目 -> 还原 NuGet 包
+3. 选择 Release 配置
+4. 按 Ctrl+Shift+B 编译
+5. 编译产物在 bin\Release\ArtcoShellExtension.dll
+
+方法二：使用命令行
+1. 打开 "Developer Command Prompt for VS 2022"
+2. cd 到此目录
+3. 运行: nuget restore
+4. 运行: msbuild /p:Configuration=Release
+5. 编译产物在 bin\Release\ArtcoShellExtension.dll
+
+
+安装步骤
+--------
+1. 以管理员身份运行 Install.bat
+2. 等待安装完成
+3. 打开任意图片文件夹查看效果
+4. 如果没有立即生效，注销后重新登录
+
+
+卸载步骤
+--------
+1. 以管理员身份运行 Uninstall.bat
+2. 等待卸载完成
+
+
+常见问题
+--------
+
+Q: 安装后缩略图没有显示格式标签？
+A: 尝试以下步骤：
+   1. 清除缩略图缓存（运行 cleanmgr）
+   2. 重启资源管理器
+   3. 或者注销重新登录
+
+Q: 提示注册失败？
+A: 确保：
+   1. 以管理员身份运行
+   2. 已安装 .NET Framework 4.8
+   3. DLL 文件存在于 bin\Release 目录
+
+Q: 只有部分格式显示标签？
+A: Windows 某些格式的缩略图提供器有更高优先级，
+   可以在注册表中调整优先级
+
+
+开发说明
+--------
+项目使用 SharpShell 库（MIT 协议）
+GitHub: https://github.com/dwmkerr/sharpshell
+
+如需添加更多格式支持，编辑 ImageFormatThumbnailHandler.cs：
+1. 在类顶部添加 [COMServerAssociation] 特性
+2. 在 FormatColors 字典中添加颜色配置
+
+
+================================================================================

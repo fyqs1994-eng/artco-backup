@@ -1,0 +1,11 @@
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\bin\Release\net48\ArtcoPsdOverlay.dll
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\bin\Release\net48\ArtcoPsdOverlay.pdb
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\bin\Release\net48\SharpShell.dll
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.csproj.AssemblyReference.cache
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.GeneratedMSBuildEditorConfig.editorconfig
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.AssemblyInfoInputs.cache
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.AssemblyInfo.cs
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.csproj.CoreCompileInputs.cache
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsd.3AF249FC.Up2Date
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.dll
+F:\Idea\Artco\shell_ext\ArtcoPsdOverlay\obj\Release\net48\ArtcoPsdOverlay.pdb

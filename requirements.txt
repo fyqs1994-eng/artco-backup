@@ -1,0 +1,10 @@
+PySide6
+google-genai
+pynput
+qtawesome
+psd-tools
+python-dotenv
+winsdk
+git+https://github.com/zhiyiYo/PyQt-Fluent-Widgets.git@PySide6
+
+

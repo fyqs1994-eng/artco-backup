@@ -1,0 +1,15 @@
+{
+  "task_type": "vision",
+  "vision_model": "gemini-2.5-flash",
+  "image_gen_model": null,
+  "api_keys": {
+    "google": "",
+    "openai": "",
+    "anthropic": ""
+  },
+  "api_base_urls": {
+    "google": "",
+    "openai": "",
+    "anthropic": ""
+  }
+}

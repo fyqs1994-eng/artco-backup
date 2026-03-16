@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+::selection {
+  background-color: rgba(92, 92, 229, 0.4);
+  color: white;
+}
+
+
+body {
+  @apply bg-zinc-950 text-zinc-100 antialiased font-sans;
+}
+
+/* 细腻的背景纹理 */
+.bg-grid {
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.04) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+/* 玻璃卡片 */
+.glass {
+  @apply bg-zinc-900/60 backdrop-blur-2xl;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 8px 32px rgba(0,0,0,0.4);
+}
+
+/* Pro Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-zinc-800 rounded-full hover:bg-zinc-700 transition-colors;
+}
+
+@layer components {
+  .focus-ring {
+    outline: none;
+  }
+  .focus-ring:focus-visible {
+    @apply ring-2 ring-offset-0;
+    --tw-ring-color: rgba(92, 92, 229, 0.5); /* brand-primary/50 */
+  }
+  
+  .pro-input {
+    @apply h-9 w-full rounded-lg border border-white/5 bg-zinc-800/50 px-3 text-sm text-zinc-100 placeholder:text-zinc-500 transition-all focus:bg-zinc-800/80 focus:ring-0;
+    outline: none;
+  }
+  .pro-input:focus {
+    border-color: rgba(92, 92, 229, 0.3); /* brand-primary/30 */
+  }
+
+  .pro-panel {
+    @apply border border-white/5 bg-zinc-900/40 rounded-xl;
+  }
+}
+
+
