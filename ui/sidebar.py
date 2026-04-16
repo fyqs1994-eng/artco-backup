@@ -17,7 +17,6 @@ import qtawesome as qta
 
 from config import workspace_config, RESOURCE_TYPES, wecom_config
 from ui.settings import SettingsDialog
-from ui.task_panel import VendorSelector, TaskListWidget
 from ui.theme import (
     BG_PRIMARY, BG_SECONDARY, BG_HOVER, BG_ACTIVE, BG_HOVER_SOFT, BG_HOVER_SUBTLE,
     BORDER_SUBTLE, BORDER_DEFAULT,
@@ -1616,102 +1615,12 @@ class InboxPanel(QWidget):
         title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px; font-weight: 600;")
         empty_layout.addWidget(title)
 
-        subtitle = QLabel("供应商提交会出现在 _INBOX 目录")
+        subtitle = QLabel("提交的文件可放入工作区 _INBOX 目录")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {TEXT_TERTIARY}; font-size: 12px;")
         empty_layout.addWidget(subtitle)
 
         self.content_layout.addWidget(empty)
-
-
-class TaskSidebarPanel(QWidget):
-    """任务中心侧边栏面板"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._task_list = None
-        self._vendor_name = ""
-        self._init_ui()
-        
-        # 检查是否已配置供应商
-        if workspace_config.is_vendor_configured():
-            self._show_task_list(
-                workspace_config.get_vendor_id(),
-                workspace_config.get_vendor_name()
-            )
-    
-    def _init_ui(self):
-        self.setStyleSheet("background: transparent;")
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        
-        # 头部（使用 SidebarHeader 保持一致）
-        self.header = SidebarHeader("任务中心")
-        self.header.add_action('mdi6.refresh', '刷新', 'refresh')
-        self.header.add_action('mdi6.swap-horizontal', '切换身份', 'switch')
-        self.header.action_clicked.connect(self._on_header_action)
-        layout.addWidget(self.header)
-        
-        # 堆叠组件
-        self.stack = QStackedWidget()
-        self.stack.setStyleSheet("background: transparent; border: none;")
-        layout.addWidget(self.stack)
-        
-        # 供应商选择页面
-        self.vendor_selector = VendorSelector()
-        self.vendor_selector.vendor_selected.connect(self._on_vendor_selected)
-        self.stack.addWidget(self.vendor_selector)
-    
-    def _on_header_action(self, action_id: str):
-        if action_id == 'refresh':
-            self.refresh()
-        elif action_id == 'switch':
-            self._switch_vendor()
-    
-    def _on_vendor_selected(self, vendor_id: str, vendor_name: str):
-        """供应商选择完成"""
-        workspace_config.set_vendor(vendor_id, vendor_name)
-        self._show_task_list(vendor_id, vendor_name)
-    
-    def _show_task_list(self, vendor_id: str, vendor_name: str):
-        """显示任务列表"""
-        self._vendor_name = vendor_name
-        
-        # 更新标题
-        self.header.set_subtitle(f"👤 {vendor_name}")
-        
-        # 任务列表容器
-        container = QWidget()
-        container.setStyleSheet("background: transparent;")
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setSpacing(0)
-        
-        # 任务列表
-        self._task_list = TaskListWidget(vendor_id)
-        container_layout.addWidget(self._task_list)
-        
-        self.stack.addWidget(container)
-        self.stack.setCurrentWidget(container)
-    
-    def _switch_vendor(self):
-        """切换供应商身份"""
-        workspace_config.set_vendor("", "")
-        self.header.set_subtitle("")
-        self.stack.setCurrentWidget(self.vendor_selector)
-        self.vendor_selector._load_vendors()
-    
-    def refresh(self):
-        """刷新任务列表"""
-        if self._task_list:
-            self._task_list.refresh_tasks()
-    
-    def set_current_image_path(self, path: Optional[str]):
-        """设置当前浏览的图片路径"""
-        if self._task_list:
-            self._task_list.set_current_image_path(path)
 
 
 class CombinedSidebar(QWidget):
@@ -1745,7 +1654,6 @@ class CombinedSidebar(QWidget):
         self.activity_bar = ActivityBar()
         self.activity_bar.add_button('mdi6.folder-outline', '资源管理器', 'explorer', 'top')
         self.activity_bar.add_button('mdi6.inbox', '收件箱', 'inbox', 'top')
-        self.activity_bar.add_button('mdi6.clipboard-check-outline', '任务中心', 'tasks', 'top')
 
         # 预留扩展位置
         # self.activity_bar.add_button('mdi6.magnify', '搜索', 'search', 'top')
@@ -1782,12 +1690,6 @@ class CombinedSidebar(QWidget):
         self.inbox_panel.count_changed.connect(self._on_inbox_count_changed)
         self.panel_stack.addWidget(self.inbox_panel)
 
-
-        
-        # 任务中心面板
-        self.task_panel = TaskSidebarPanel()
-        self.panel_stack.addWidget(self.task_panel)
-        
         # 后续可扩展：搜索面板、设置面板等
         # self.search_panel = SearchPanel()
         # self.panel_stack.addWidget(self.search_panel)
@@ -1843,9 +1745,6 @@ class CombinedSidebar(QWidget):
                 self.inbox_panel.refresh()
                 # 打开收件箱时标记为已读
                 self.inbox_panel.mark_as_read()
-            elif panel_id == 'tasks':
-                self.panel_stack.setCurrentWidget(self.task_panel)
-                self.task_panel.refresh()
 
             # 后续扩展
             # elif panel_id == 'search':
@@ -1894,8 +1793,6 @@ class CombinedSidebar(QWidget):
     
     def set_current_file(self, file_path: str):
         self.explorer_panel.set_current_file(file_path)
-        # 同时同步给任务面板
-        self.task_panel.set_current_image_path(file_path)
     
     def set_current_image(self, image_data: bytes):
         """设置当前图片数据（用于企微发送）"""

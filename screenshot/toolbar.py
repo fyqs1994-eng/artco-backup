@@ -2,6 +2,7 @@
 截图模块 - 工具栏组件
 """
 
+import os
 import re
 
 import qtawesome as qta
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QLineEdit, QScrollArea, QLabel, QTextEdit, QFileDialog, QApplication
 )
 from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QPropertyAnimation, QEasingCurve, Property, QEvent
-from PySide6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QFont
+from PySide6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QFont, QIcon, QPen
 
 from .canvas import EditorCanvas
 from database import get_all_records, get_image_full_path
@@ -35,7 +36,7 @@ class ColorBubble(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._current_color = PRESET_COLORS[0]
@@ -72,8 +73,33 @@ class ColorBubble(QWidget):
     def _on_color_clicked(self, color: QColor):
         self._current_color = color
         self.color_selected.emit(color)
-        self.hide()
+        self._highlight_selected()
     
+    def _highlight_selected(self):
+        """高亮当前选中颜色按钮"""
+        for i, color in enumerate(PRESET_COLORS):
+            btn = self.layout().itemAt(i).widget()
+            if color == self._current_color:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {color.name()};
+                        border: 2px solid rgba(0, 120, 215, 0.9);
+                        border-radius: 11px;
+                    }}
+                """)
+            else:
+                border = "2px solid rgba(0,0,0,0.3)" if color == QColor(255, 255, 255) else "2px solid transparent"
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {color.name()};
+                        border: {border};
+                        border-radius: 11px;
+                    }}
+                    QPushButton:hover {{
+                        border: 2px solid rgba(0, 120, 215, 0.8);
+                    }}
+                """)
+
     def show_at(self, global_pos: QPoint):
         """在指定全局位置显示"""
         self.adjustSize()
@@ -93,8 +119,60 @@ class ColorBubble(QWidget):
         painter.drawRoundedRect(self.rect(), 12, 12)
     
     def focusOutEvent(self, event):
-        self.hide()
         super().focusOutEvent(event)
+
+
+class _OverlayColorPanel(QWidget):
+    """颜色选择面板 - 作为 overlay 的子控件，不会被遮挡"""
+    color_selected = Signal(QColor)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._current_color = PRESET_COLORS[0]
+        self._init_ui()
+        self.hide()
+
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+        self._btns = []
+        for color in PRESET_COLORS:
+            btn = QPushButton(self)
+            btn.setFixedSize(22, 22)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(color.name())
+            btn.setProperty("_color", color)
+            btn.clicked.connect(lambda checked, c=color: self._on_click(c))
+            self._btns.append(btn)
+            layout.addWidget(btn)
+        self._refresh_styles()
+
+    def _on_click(self, color: QColor):
+        self._current_color = color
+        self._refresh_styles()
+        self.color_selected.emit(color)
+
+    def _refresh_styles(self):
+        for b in self._btns:
+            c = b.property("_color")
+            if c == self._current_color:
+                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:2px solid rgba(0,120,215,0.9);border-radius:11px;}}")
+            else:
+                bd = "2px solid rgba(0,0,0,0.25)" if c == QColor(255,255,255) else "2px solid transparent"
+                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:{bd};border-radius:11px;}}QPushButton:hover{{border:2px solid rgba(0,120,215,0.7);}}")
+
+    def sizeHint(self):
+        n = len(PRESET_COLORS)
+        w = 8 + 8 + n * 22 + (n - 1) * 4
+        return QSize(w, 34)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(0, 0, 0, 20), 1))
+        painter.setBrush(QColor(255, 255, 255, 235))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 10, 10)
 
 
 class ColorIndicatorButton(QPushButton):
@@ -117,19 +195,33 @@ class ColorIndicatorButton(QPushButton):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # 绘制中心圆形色块
+
+        # 与其他工具按钮统一：透明底，hover/pressed 时仅显示浅色圆角背景
+        bg = None
+        if self.isDown():
+            bg = QColor(0, 0, 0, 30)
+        elif self.underMouse():
+            bg = QColor(0, 0, 0, 20)
+
+        if bg is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(bg)
+            painter.drawRoundedRect(self.rect(), 18, 18)
+
+        # 绘制中心颜色指示，更克制一些
         center = self.rect().center()
-        radius = 8
-        
-        # 白色底色圈（区分白色标记色）
+        outer_radius = 7
+        inner_radius = 5
+
+        # 中性外圈，避免视觉过于扎眼，同时白色也能被看见
+        painter.setPen(QPen(QColor(0, 0, 0, 35), 1))
+        painter.setBrush(QColor(255, 255, 255, 160))
+        painter.drawEllipse(center, outer_radius, outer_radius)
+
+        # 内部颜色点
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(220, 220, 220))
-        painter.drawEllipse(center, radius + 1, radius + 1)
-        
-        # 颜色圆
         painter.setBrush(self._color)
-        painter.drawEllipse(center, radius, radius)
+        painter.drawEllipse(center, inner_radius, inner_radius)
 
 
 class EditorToolbar(QWidget):
@@ -161,7 +253,7 @@ class EditorToolbar(QWidget):
             ('mdi6.format-list-numbered', "序号点", EditorCanvas.TOOL_NUMBER),
             ('mdi6.vector-rectangle', "矩形框", EditorCanvas.TOOL_RECT),
             ('mdi6.arrow-right', "箭头", EditorCanvas.TOOL_ARROW),
-            ('mdi6.brush', "画笔", EditorCanvas.TOOL_FREEHAND),
+            ('mdi6.signature-freehand', "画笔", EditorCanvas.TOOL_FREEHAND),
             ('mdi6.format-text', "文字", EditorCanvas.TOOL_TEXT),
             ('mdi6.eraser', "橡皮擦", EditorCanvas.TOOL_ERASER),
         ]
@@ -288,7 +380,6 @@ class EditorToolbar(QWidget):
     
     def _on_color_selected(self, color: QColor):
         """颜色被选中"""
-        self.btn_color.set_color(color)
         self.color_changed.emit(color)
 
 
@@ -745,6 +836,30 @@ class ScreenshotAICapsule(QWidget):
         """更新下拉列表中当前选中项的高亮"""
         for i, (name, btn, ptype) in enumerate(visible_items):
             btn.setHighlighted(i == self._dropdown_selected_index)
+
+        # 滚动到选中项可见
+        if 0 <= self._dropdown_selected_index < len(visible_items):
+            selected_btn = visible_items[self._dropdown_selected_index][1]
+            scroll_area = self._dropdown._scroll
+
+            # 获取滚动区域的几何信息
+            scroll_y = scroll_area.verticalScrollBar().value()
+            view_height = scroll_area.height()
+
+            # 获取按钮在内容容器中的位置
+            btn_y = selected_btn.pos().y()
+            btn_height = selected_btn.height()
+
+            # 计算按钮在滚动视图中的相对位置
+            btn_bottom = btn_y + btn_height
+
+            # 如果按钮底部超出视图，向下滚动
+            if btn_bottom > scroll_y + view_height:
+                scroll_area.verticalScrollBar().setValue(btn_bottom - view_height)
+            # 如果按钮顶部在视图上方，向上滚动
+            elif btn_y < scroll_y:
+                scroll_area.verticalScrollBar().setValue(btn_y)
+
     
     def _toggle_mode(self):
         """切换模式（文本/图片）"""
@@ -945,7 +1060,7 @@ class ScreenshotToolbar(QWidget):
     width_changed = Signal()  # 宽度变化信号，用于同步位置
     
     # 尺寸常量
-    EXPANDED_WIDTH = 460
+    EXPANDED_WIDTH = 500
     COLLAPSED_WIDTH = 48
     
     def __init__(self, parent):
@@ -955,7 +1070,6 @@ class ScreenshotToolbar(QWidget):
         self._is_collapsed = False
         self._height = 48
         self._current_mark_tool = 'none'
-        self._color_bubble = None
         
         self._setup_animation()
         self.init_ui()
@@ -997,6 +1111,12 @@ class ScreenshotToolbar(QWidget):
         self.buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.buttons_layout.setSpacing(4)
 
+        def add_v_separator():
+            sep = QWidget()
+            sep.setFixedSize(1, 22)
+            sep.setObjectName("toolbar_separator")
+            self.buttons_layout.addWidget(sep)
+
         # 操作按钮（复制放最左侧）
         buttons_left = [
             ('mdi6.content-copy', "复制到剪贴板", "btn_confirm", self.parent().finish_screenshot),
@@ -1013,11 +1133,14 @@ class ScreenshotToolbar(QWidget):
             btn.clicked.connect(callback)
             self.buttons_layout.addWidget(btn)
 
+        # 分区：复制 | 标记工具
+        add_v_separator()
+
         # 快速标记工具按钮（可切换状态）
         self.mark_buttons = {}
         mark_tools = [
             ('mdi6.vector-rectangle', "矩形框 (R)", 'rect'),
-            ('mdi6.draw', "涂鸦 (D)", 'freehand'),
+            ('mdi6.signature-freehand', "涂鸦 (D)", 'freehand'),
             ('mdi6.format-text', "文字 (T)", 'text'),
         ]
         
@@ -1034,30 +1157,43 @@ class ScreenshotToolbar(QWidget):
             self.mark_buttons[tool_id] = btn
             self.buttons_layout.addWidget(btn)
 
-        # 颜色按钮（紧跟标记工具后面）
+        # 颜色指示按钮
         self.btn_color = ColorIndicatorButton()
-        self.btn_color.clicked.connect(self._on_color_btn_clicked)
+        self.btn_color.clicked.connect(self._toggle_color_panel)
         self.buttons_layout.addWidget(self.btn_color)
+
+        self._color_panel = None  # lazy init, child of overlay
+
+        # 分区：标记工具 | 后续动作
+        add_v_separator()
 
         # 其他操作按钮
         buttons_right = [
             ('mdi6.content-save', "保存文件", "btn_save", self.parent().save_screenshot),
             ('mdi6.text-recognition', "OCR 文字识别", "btn_ocr", self.parent().ocr_screenshot),
+            ('mdi6.palette-outline', "在 Photoshop 打开", "btn_ps", self.parent().open_in_photoshop),
             ('mdi6.pin', "屏幕贴图", "btn_pin", self.parent().trigger_pin_action),
             ('mdi6.inbox-arrow-down', "快速归档", "btn_archive", self.parent().quick_archive),
-            ('mdi6.pencil-outline', "编辑器", "btn_edit", self.parent().open_editor),
+            ('mdi6.image-edit-outline', "编辑器", "btn_edit", self.parent().open_editor),
             ('mdi6.close', "取消", "btn_close", self.parent().close)
         ]
 
         for icon_name, tooltip, obj_name, callback in buttons_right:
             btn = QPushButton()
-            btn.setIcon(qta.icon(icon_name, color='#555555'))
-            btn.setIconSize(QSize(18, 18))
             btn.setFixedSize(36, 36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
             btn.setObjectName(obj_name)
             btn.clicked.connect(callback)
+            if obj_name == "btn_ps":
+                ps_icon_path = os.path.normpath(
+                    os.path.join(os.path.dirname(__file__), "..", "ui", "resources", "ps_monoline.svg")
+                )
+                btn.setIcon(QIcon(ps_icon_path))
+                btn.setIconSize(QSize(18, 18))
+            else:
+                btn.setIcon(qta.icon(icon_name, color='#555555'))
+                btn.setIconSize(QSize(18, 18))
             self.buttons_layout.addWidget(btn)
         
         self._main_layout.addWidget(self.buttons_container)
@@ -1081,6 +1217,12 @@ class ScreenshotToolbar(QWidget):
             QPushButton:checked {
                 background-color: rgba(0, 120, 215, 0.2);
             }
+            QWidget#toolbar_separator {
+                background-color: rgba(0, 0, 0, 0.16);
+                border-radius: 1px;
+                margin-top: 7px;
+                margin-bottom: 7px;
+            }
         """)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
 
@@ -1096,16 +1238,13 @@ class ScreenshotToolbar(QWidget):
     
     def _on_mark_tool_clicked(self, tool_id: str):
         """标记工具按钮被点击"""
-        # 如果点击的是当前工具，则取消选中
         if self._current_mark_tool == tool_id:
             self._current_mark_tool = 'none'
             self.mark_buttons[tool_id].setChecked(False)
         else:
-            # 取消其他工具的选中状态
             for tid, btn in self.mark_buttons.items():
                 btn.setChecked(tid == tool_id)
             self._current_mark_tool = tool_id
-        
         self.mark_tool_changed.emit(self._current_mark_tool)
     
     def set_mark_tool(self, tool_id: str):
@@ -1116,25 +1255,37 @@ class ScreenshotToolbar(QWidget):
     
     def get_mark_tool(self) -> str:
         return self._current_mark_tool
-    
-    def _on_color_btn_clicked(self):
-        """点击颜色按钮 - 在按钮下方弹出气泡"""
-        if self._color_bubble is None:
-            self._color_bubble = ColorBubble()
-            self._color_bubble.color_selected.connect(self._on_color_selected)
-        
-        if self._color_bubble.isVisible():
-            self._color_bubble.hide()
+
+    def _toggle_color_panel(self):
+        """切换颜色面板的显示/隐藏"""
+        overlay = self.parent()
+        if self._color_panel is None:
+            self._color_panel = _OverlayColorPanel(overlay)
+            self._color_panel.color_selected.connect(self._on_panel_color_selected)
+        if self._color_panel.isVisible():
+            self._color_panel.hide()
+        else:
+            self._position_color_panel()
+            self._color_panel.show()
+            self._color_panel.raise_()
+
+    def _position_color_panel(self):
+        """将颜色面板定位到颜色按钮上方"""
+        if self._color_panel is None:
             return
-        
-        # 计算按钮下方的全局位置
+        overlay = self.parent()
         btn_global = self.btn_color.mapToGlobal(QPoint(0, 0))
-        bubble_x = btn_global.x() + self.btn_color.width() // 2
-        bubble_y = btn_global.y() + self.btn_color.height() + 6
-        self._color_bubble.show_at(QPoint(bubble_x, bubble_y))
-    
-    def _on_color_selected(self, color: QColor):
-        """颜色被选中"""
+        local = overlay.mapFromGlobal(btn_global)
+        pw = self._color_panel.sizeHint().width()
+        ph = self._color_panel.sizeHint().height()
+        x = local.x() + self.btn_color.width() // 2 - pw // 2
+        y = local.y() - ph - 6
+        if y < 4:
+            y = local.y() + self.btn_color.height() + 6
+        self._color_panel.setGeometry(x, y, pw, ph)
+
+    def _on_panel_color_selected(self, color: QColor):
+        """颜色面板选色回调"""
         self.btn_color.set_color(color)
         self.color_changed.emit(color)
     
@@ -1145,6 +1296,8 @@ class ScreenshotToolbar(QWidget):
         self._is_collapsed = True
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         
+        if self._color_panel and self._color_panel.isVisible():
+            self._color_panel.hide()
         self.buttons_container.hide()
         self.btn_expand.show()
         
@@ -1432,12 +1585,12 @@ class NumberAnnotationPanel(QWidget):
         self._annotations[number] = ""
         self._visible_count += 1
         
-        # 自动聚焦到新输入框
-        text_edit.setFocus()
+        # 不再自动聚焦到新输入框，改为用户点击序号点后再聚焦
         
         # 显示面板
         if self._visible_count == 1:
             self.show()
+
     
     def remove_annotation(self, number: int):
         """移除序号注释"""
@@ -1462,7 +1615,12 @@ class NumberAnnotationPanel(QWidget):
         # 隐藏面板
         if self._visible_count == 0:
             self.hide()
-    
+
+    def focus_annotation(self, number: int):
+        """聚焦到指定序号的输入框"""
+        if number in self._text_edits:
+            self._text_edits[number].setFocus()
+
     def renumber(self, old_to_new: dict[int, int]):
         """重新编号（当序号点被删除后调整）"""
         # 保存旧数据
@@ -1547,7 +1705,8 @@ class NumberAnnotationPanel(QWidget):
         """为指定序号设置图片"""
         if number not in self._image_labels:
             return
-        
+        # 深拷贝：剪贴板上的 QPixmap 与 clipboard 缓冲可能共享，复制/导出后 setPixmap 会替换缓冲导致缩略图被清空
+        pixmap = QPixmap(pixmap)
         self._images[number] = pixmap
         label = self._image_labels[number]
         

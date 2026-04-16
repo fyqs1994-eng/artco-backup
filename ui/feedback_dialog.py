@@ -5,7 +5,6 @@
 import base64
 import hashlib
 import requests
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -37,25 +36,15 @@ class WeComSendThread(QThread):
     """企微发送线程"""
     finished = Signal(bool, str)  # success, message
     
-    # 发送模式
-    MODE_IMAGE = "image"  # 直接发图片
-    MODE_NEWS = "news"    # 图文卡片
-    
-    def __init__(self, webhook_url: str, image_data: bytes, note: str, 
-                 mode: str = "image", image_url: str = "", parent=None):
+    def __init__(self, webhook_url: str, image_data: bytes, note: str, parent=None):
         super().__init__(parent)
         self._webhook_url = webhook_url
         self._image_data = image_data
         self._note = note
-        self._mode = mode
-        self._image_url = image_url  # 图文卡片模式需要的图片 URL
     
     def run(self):
         try:
-            if self._mode == self.MODE_NEWS and self._image_url:
-                self._send_news_card()
-            else:
-                self._send_image()
+            self._send_image()
         except requests.Timeout:
             self.finished.emit(False, "发送超时，请检查网络连接")
         except requests.RequestException as e:
@@ -112,44 +101,6 @@ class WeComSendThread(QThread):
             if resp.status_code != 200:
                 self.finished.emit(True, "图片已发送，但备注发送失败")
                 return
-        
-        self.finished.emit(True, "发送成功")
-    
-    def _send_news_card(self):
-        """发送图文卡片模式"""
-        # 构建图文卡片
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        title = "设计反馈"
-        description = self._note if self._note else f"反馈时间: {timestamp}"
-        
-        news_payload = {
-            "msgtype": "news",
-            "news": {
-                "articles": [
-                    {
-                        "title": title,
-                        "description": description,
-                        "url": self._image_url,  # 点击跳转到图片
-                        "picurl": self._image_url  # 卡片封面图
-                    }
-                ]
-            }
-        }
-        
-        resp = requests.post(
-            self._webhook_url,
-            json=news_payload,
-            timeout=30
-        )
-        
-        if resp.status_code != 200:
-            self.finished.emit(False, f"发送卡片失败: HTTP {resp.status_code}")
-            return
-        
-        result = resp.json()
-        if result.get("errcode") != 0:
-            self.finished.emit(False, f"发送卡片失败: {result.get('errmsg', '未知错误')}")
-            return
         
         self.finished.emit(True, "发送成功")
 
@@ -248,22 +199,6 @@ class FeedbackDialog(QDialog):
         self.label_wecom_hint.setContentsMargins(100, 0, 0, 0)
         self.label_wecom_hint.setVisible(False)
         target_layout.addWidget(self.label_wecom_hint)
-        
-        # 发送模式选择（企微群专属）
-        self.mode_container = QWidget()
-        mode_layout = QHBoxLayout(self.mode_container)
-        mode_layout.setContentsMargins(100, 0, 0, 0)
-        mode_layout.setSpacing(SPACING_MD)
-        
-        self.check_news_mode = QCheckBox("使用图文卡片")
-        self.check_news_mode.setToolTip("发送精美的图文卡片（需要网络上传图片）")
-        self.check_news_mode.setStyleSheet(get_checkbox_style())
-        mode_layout.addWidget(self.check_news_mode)
-
-        mode_layout.addStretch()
-        
-        self.mode_container.setVisible(False)  # 默认隐藏
-        target_layout.addWidget(self.mode_container)
         
         # 仅复制到剪贴板
         self.radio_clipboard = QRadioButton("仅复制到剪贴板")
@@ -365,8 +300,6 @@ class FeedbackDialog(QDialog):
         # 启用/禁用对应的下拉框
         self.combo_wecom_group.setEnabled(is_group and has_webhooks)
         
-        # 显示/隐藏发送模式选择与提示
-        self.mode_container.setVisible(is_group and has_webhooks)
         self.label_wecom_hint.setVisible(is_group and not has_webhooks)
 
         self._update_send_state()
@@ -426,19 +359,10 @@ class FeedbackDialog(QDialog):
             # 记录上次使用
             wecom_config.set_last_used(webhook_name)
             
-            # 判断发送模式
-            use_news_mode = self.check_news_mode.isChecked()
-            
-            if use_news_mode:
-                # 图文卡片模式：先上传图片到 Supabase
-                self.btn_send.setText("上传图片...")
-                self._upload_and_send_news(webhook_url, image_data, note)
-            else:
-                # 直接发送图片模式
-                self.btn_send.setText("发送中...")
-                self._send_thread = WeComSendThread(webhook_url, image_data, note)
-                self._send_thread.finished.connect(self._on_wecom_send_finished)
-                self._send_thread.start()
+            self.btn_send.setText("发送中...")
+            self._send_thread = WeComSendThread(webhook_url, image_data, note)
+            self._send_thread.finished.connect(self._on_wecom_send_finished)
+            self._send_thread.start()
             return
         
         elif target_idx == 1:  # 仅复制到剪贴板
@@ -469,40 +393,6 @@ class FeedbackDialog(QDialog):
             self.accept()
         else:
             QMessageBox.warning(self, "发送失败", message)
-    
-    def _upload_and_send_news(self, webhook_url: str, image_data: bytes, note: str):
-        """上传图片并发送图文卡片"""
-        from supabase_client import upload_feedback_image
-        
-        # 同步上传（考虑到简单性，这里用同步方式）
-        # TODO: 可以改成异步
-        try:
-            result = upload_feedback_image(image_data, "png")
-            
-            if not result["success"]:
-                self.btn_send.setEnabled(True)
-                self.btn_cancel.setEnabled(True)
-                self.btn_send.setText("发送反馈")
-                QMessageBox.warning(self, "上传失败", result["message"])
-                return
-            
-            image_url = result["url"]
-            
-            # 发送图文卡片
-            self.btn_send.setText("发送卡片...")
-            self._send_thread = WeComSendThread(
-                webhook_url, image_data, note,
-                mode=WeComSendThread.MODE_NEWS,
-                image_url=image_url
-            )
-            self._send_thread.finished.connect(self._on_wecom_send_finished)
-            self._send_thread.start()
-            
-        except Exception as e:
-            self.btn_send.setEnabled(True)
-            self.btn_cancel.setEnabled(True)
-            self.btn_send.setText("发送反馈")
-            QMessageBox.warning(self, "错误", f"上传图片失败: {str(e)}")
     
     def _save_to_history(self, note: str):
         """保存到历史记录"""

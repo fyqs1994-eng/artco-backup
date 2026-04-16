@@ -1,52 +1,55 @@
 """
-设置对话框模块
-包含 AI 配置和快捷键设置
+设置对话框 — Raycast Preferences 风格
+顶部 icon+text 工具栏 · 白底单列表单 · 零装饰
+所有详情页共用 _section / _form_row 布局规则
 """
 
 import sys
 import os
+import json
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QGroupBox, QTabWidget, QWidget, QLabel,
-    QKeySequenceEdit, QMessageBox, QLineEdit, QPushButton,
-    QScrollArea, QFrame, QComboBox
+    QDialog, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QKeySequenceEdit, QMessageBox,
+    QLineEdit, QPushButton, QScrollArea, QFrame,
+    QComboBox, QMenu, QStackedWidget, QToolButton,
+    QListWidget, QListWidgetItem, QSizePolicy,
 )
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer
 from PySide6.QtGui import QKeySequence
+import qtawesome as qta
 
-from config import AI_MODELS, ai_config, wecom_config, workspace_config
+from config import AI_MODELS, ai_config, wecom_config, ps_config
 from utils import hotkey_manager
+from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
-    get_group_box_style,
-    BG_PRIMARY, BG_SECONDARY, BG_ACTIVE, BORDER_DEFAULT, RADIUS_SM, TEXT_TERTIARY
+    FONT_FAMILY,
+    BG_HOVER, BORDER_DEFAULT,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
+    ACCENT_PRIMARY, ACCENT_SUBTLE,
+    RADIUS_SM, RADIUS_MD,
+    COLOR_ERROR,
+    MENU_STYLE,
 )
 
 
-
-
+# ── helper utilities ──────────────────────────────────────────
 
 def get_app_path():
-    """获取应用程序路径"""
     if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后
         return sys.executable
-    else:
-        # 开发环境
-        return os.path.abspath(sys.argv[0])
+    return os.path.abspath(sys.argv[0])
 
 
 def is_autostart_enabled():
-    """检查是否已启用开机启动"""
     if sys.platform != 'win32':
         return False
-    
     try:
         import winreg
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_READ
+            0, winreg.KEY_READ,
         )
         try:
             winreg.QueryValueEx(key, "Artco")
@@ -60,16 +63,14 @@ def is_autostart_enabled():
 
 
 def set_autostart(enable: bool):
-    """设置开机启动"""
     if sys.platform != 'win32':
         return False
-    
     try:
         import winreg
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE
+            0, winreg.KEY_SET_VALUE,
         )
         try:
             if enable:
@@ -79,7 +80,7 @@ def set_autostart(enable: bool):
                 try:
                     winreg.DeleteValue(key, "Artco")
                 except FileNotFoundError:
-                    pass  # 不存在也没关系
+                    pass
             return True
         finally:
             winreg.CloseKey(key)
@@ -88,549 +89,1284 @@ def set_autostart(enable: bool):
         return False
 
 
+# ── 视觉常量 ──────────────────────────────────────────────────
+_TOOLBAR_BG  = "#ECECEC"
+_CONTENT_BG  = "#FFFFFF"
+_SEPARATOR   = "#DCDCDC"
+_TAB_CHECKED = "rgba(0,0,0,0.08)"
+_TAB_HOVER   = "rgba(0,0,0,0.04)"
+_SEC_COLOR   = "rgba(0,0,0,0.40)"
+_FORM_LABEL  = "rgba(0,0,0,0.55)"
+_ROW_H       = 34
+_LABEL_W     = 120
+_PAGE_LR     = 48
+_PAGE_TB     = 28
+_SEC_GAP     = 10
+_ROW_GAP     = 10
+_BLOCK_GAP   = 24
+
+
+class _PromptRow(QWidget):
+    """Prompt list row: show checkbox on hover, always show if checked."""
+
+    def __init__(self, is_default: bool, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:transparent;")
+        self.cb = None
+        self._is_default = is_default
+
+    def enterEvent(self, event):
+        if self.cb and not self.cb.isChecked():
+            self.cb.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self.cb and not self.cb.isChecked():
+            self.cb.setVisible(False)
+        super().leaveEvent(event)
+
+
+# ══════════════════════════════════════════════════════════════
 class SettingsDialog(QDialog):
-    """设置对话框"""
+    """设置对话框 — Raycast 风格"""
     hotkey_changed = Signal()
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedSize(550, 600)
+        self.resize(820, 600)
+        self.setMinimumSize(780, 540)
+        self._current_provider_detail = None
+        self._prompt_current_id = None
+        self._prompt_data: list = []
         self.init_ui()
-    
+
+    # ══════════════════════════════════════════════════════
+    #  UI 主体
+    # ══════════════════════════════════════════════════════
+
     def init_ui(self):
         os.environ.setdefault("QT_API", "pyside6")
-        from qfluentwidgets import PushButton, PrimaryPushButton, ComboBox, LineEdit, CheckBox
+        from qfluentwidgets import PushButton, PrimaryPushButton
 
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        layout.setSpacing(15)
-        
-        # 使用标签页
-        self.tab_widget = QTabWidget()
-        
-        # === AI 设置标签页 ===
-        ai_tab = QWidget()
-        ai_layout = QVBoxLayout(ai_tab)
-        ai_layout.setSpacing(12)
-        
-        # 任务类型选择
-        task_group = QGroupBox("任务类型")
-        task_layout = QFormLayout(task_group)
-        task_layout.setSpacing(10)
-        
-        self.task_type_combo = ComboBox()
+        # ── 1. 顶部工具栏 ──
+        toolbar = QWidget()
+        toolbar.setObjectName("rc_toolbar")
+        toolbar.setFixedHeight(64)
+        tb = QHBoxLayout(toolbar)
+        tb.setContentsMargins(0, 6, 0, 2)
+        tb.setSpacing(2)
+        tb.addStretch()
 
-        self.task_type_combo.addItem("视觉分析 (Vision)", "vision")
-        self.task_type_combo.addItem("图像生成 (Image Gen)", "image_gen")
-        current_task = ai_config.get("task_type", "vision")
-        index = self.task_type_combo.findData(current_task)
-        if index >= 0:
-            self.task_type_combo.setCurrentIndex(index)
-        else:
-            self.task_type_combo.setCurrentIndex(0)
-        self.task_type_combo.currentIndexChanged.connect(self._on_task_type_changed)
-        task_layout.addRow("类型:", self.task_type_combo)
-        
-        # 模型选择
-        self.model_combo = ComboBox()
+        tab_defs = [
+            ("mdi6.creation-outline",     "AI 设置"),
+            ("mdi6.text-box-edit-outline", "Prompt"),
+            ("mdi6.keyboard-outline",      "快捷键"),
+            ("mdi6.tune-vertical",         "通用"),
+        ]
+        self._tab_btns: list[QToolButton] = []
+        for i, (icon_name, label) in enumerate(tab_defs):
+            btn = QToolButton()
+            btn.setObjectName("rc_tab")
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            btn.setIcon(qta.icon(icon_name, color="#555"))
+            btn.setIconSize(QSize(20, 20))
+            btn.setText(label)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            btn.setFixedSize(76, 52)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, idx=i: self._switch_tab(idx))
+            tb.addWidget(btn)
+            self._tab_btns.append(btn)
+        tb.addStretch()
+        root.addWidget(toolbar)
 
-        self._update_model_list()
-        task_layout.addRow("模型:", self.model_combo)
+        self._add_sep(root)
 
-        
-        ai_layout.addWidget(task_group)
-        
-        # API 配置
-        api_group = QGroupBox("API 配置")
-        api_layout = QFormLayout(api_group)
-        api_layout.setSpacing(10)
-        
-        # Google API Key
-        self.google_key_input = LineEdit()
+        # ── 2. 内容区 ──
+        self._pages = QStackedWidget()
+        self._pages.setObjectName("rc_pages")
+        self._pages.addWidget(self._build_ai_page())
+        self._pages.addWidget(self._build_prompt_page())
+        self._pages.addWidget(self._build_hotkey_page())
+        self._pages.addWidget(self._build_general_page())
+        root.addWidget(self._pages, 1)
 
-        self.google_key_input.setPlaceholderText("输入 Google AI API Key")
-        self.google_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.google_key_input.setText(ai_config.get_api_key("google"))
-        api_layout.addRow("Google Key:", self.google_key_input)
-        
-        # Google Base URL
-        self.google_base_url = LineEdit()
+        self._add_sep(root)
 
-        self.google_base_url.setPlaceholderText("可选，自定义 API 地址")
-        self.google_base_url.setText(ai_config.get_api_base_url("google"))
-        api_layout.addRow("Google URL:", self.google_base_url)
-        
-        # OpenAI API Key
-        self.openai_key_input = LineEdit()
+        # ── 3. 底栏 ──
+        bottom = QWidget()
+        bottom.setObjectName("rc_toolbar")
+        blay = QHBoxLayout(bottom)
+        blay.setContentsMargins(20, 10, 20, 10)
+        blay.addStretch()
+        self.btn_cancel = PushButton("取消")
+        self.btn_cancel.setFixedSize(88, 32)
+        self.btn_cancel.clicked.connect(self.reject)
+        blay.addWidget(self.btn_cancel)
+        self.btn_save = PrimaryPushButton("保存")
+        self.btn_save.setFixedSize(88, 32)
+        self.btn_save.clicked.connect(self._save_settings)
+        blay.addWidget(self.btn_save)
+        root.addWidget(bottom)
 
-        self.openai_key_input.setPlaceholderText("输入 OpenAI API Key")
-        self.openai_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.openai_key_input.setText(ai_config.get_api_key("openai"))
-        api_layout.addRow("OpenAI Key:", self.openai_key_input)
-        
-        # OpenAI Base URL
-        self.openai_base_url = LineEdit()
+        # ── 4. 全局 QSS ──
+        self.setStyleSheet(self._stylesheet())
+        self._tab_btns[0].setChecked(True)
+        self._pages.setCurrentIndex(0)
 
-        self.openai_base_url.setPlaceholderText("可选，自定义 API 地址")
-        self.openai_base_url.setText(ai_config.get_api_base_url("openai"))
-        api_layout.addRow("OpenAI URL:", self.openai_base_url)
-        
-        # Anthropic API Key
-        self.anthropic_key_input = LineEdit()
+    # ── Tab 切换 ──────────────────────────────────────────
+    def _switch_tab(self, idx: int):
+        self._pages.setCurrentIndex(idx)
+        for i, b in enumerate(self._tab_btns):
+            b.setChecked(i == idx)
 
-        self.anthropic_key_input.setPlaceholderText("输入 Anthropic API Key")
-        self.anthropic_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.anthropic_key_input.setText(ai_config.get_api_key("anthropic"))
-        api_layout.addRow("Anthropic Key:", self.anthropic_key_input)
-        
-        # Anthropic Base URL
-        self.anthropic_base_url = LineEdit()
+    def show_tab(self, tab_id: str):
+        mapping = {'ai': 0, 'prompt': 1, 'hotkey': 2, 'general': 3, 'wecom': 0}
+        self._switch_tab(mapping.get(tab_id, 0))
 
-        self.anthropic_base_url.setPlaceholderText("可选，自定义 API 地址")
-        self.anthropic_base_url.setText(ai_config.get_api_base_url("anthropic"))
-        api_layout.addRow("Anthropic URL:", self.anthropic_base_url)
-        
-        ai_layout.addWidget(api_group)
-        ai_layout.addStretch()
-        
-        self.tab_widget.addTab(ai_tab, "AI 设置")
-        
-        # === 快捷键设置标签页 ===
-        hotkey_tab = QWidget()
-        hotkey_layout_main = QVBoxLayout(hotkey_tab)
-        hotkey_layout_main.setSpacing(10)
-        
-        # 全局快捷键
-        global_group = QGroupBox("全局快捷键")
-        global_layout = QFormLayout(global_group)
-        global_layout.setSpacing(10)
-        
+    # ══════════════════════════════════════════════════════
+    #  共用 widget 工厂
+    # ══════════════════════════════════════════════════════
+
+    @staticmethod
+    def _section(text: str) -> QWidget:
+        box = QWidget()
+        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(10)
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"color:{_SEC_COLOR}; font-size:13px; font-weight:600;"
+        )
+        h.addWidget(lbl)
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background:{_SEPARATOR}; border:none;")
+        h.addWidget(line, 1)
+        return box
+
+    @staticmethod
+    def _form_row(label_text: str, widget: QWidget, label_w: int = _LABEL_W) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        lbl = QLabel(label_text)
+        lbl.setFixedWidth(label_w)
+        lbl.setStyleSheet(f"color:{_FORM_LABEL}; font-size:13px;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(lbl)
+        row.addWidget(widget, 1)
+        return row
+
+    @staticmethod
+    def _tip(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{TEXT_TERTIARY}; font-size:11px; padding-left:2px;")
+        return lbl
+
+    @staticmethod
+    def _fix_key_edit(edit: QKeySequenceEdit):
+        """Remove internal layout margins so inner QLineEdit fills the full widget."""
+        lo = edit.layout()
+        if lo:
+            lo.setContentsMargins(0, 0, 0, 0)
+            lo.setSpacing(0)
+
+    @staticmethod
+    def _add_sep(layout: QVBoxLayout):
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{_SEPARATOR};")
+        layout.addWidget(sep)
+
+    @staticmethod
+    def _scroll_page() -> tuple:
+        """返回 (page=QScrollArea, body_layout=QVBoxLayout)，统一页面骨架。"""
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer = QWidget()
+        oh = QHBoxLayout(outer)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(0)
+        oh.addStretch(1)
+        body = QWidget()
+        body.setFixedWidth(650)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(_PAGE_LR, _PAGE_TB, _PAGE_LR, _PAGE_TB)
+        lay.setSpacing(0)
+        oh.addWidget(body)
+        oh.addStretch(1)
+        page.setWidget(outer)
+        return page, lay
+
+    # ══════════════════════════════════════════════════════
+    #  PAGE 0 — AI 设置
+    # ══════════════════════════════════════════════════════
+
+    def _build_ai_page(self):
+        from qfluentwidgets import PushButton, ComboBox
+
+        page, lay = self._scroll_page()
+
+        # section: 服务商
+        lay.addWidget(self._section("服务商"))
+        lay.addSpacing(_SEC_GAP)
+
+        combo_w = QWidget()
+        ch = QHBoxLayout(combo_w)
+        ch.setContentsMargins(0, 0, 0, 0)
+        ch.setSpacing(8)
+        self.provider_combo = ComboBox()
+        self.provider_combo.setMinimumWidth(180)
+        self.provider_combo.setFixedHeight(_ROW_H)
+        self._refresh_provider_combo()
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        ch.addWidget(self.provider_combo, 1)
+
+        self.btn_add_provider = PushButton("+")
+        self.btn_add_provider.setFixedSize(_ROW_H, _ROW_H)
+        self.btn_add_provider.setToolTip("添加服务商")
+        self.btn_add_provider.clicked.connect(self._add_provider)
+        ch.addWidget(self.btn_add_provider)
+        self.btn_remove_provider = PushButton("−")
+        self.btn_remove_provider.setFixedSize(_ROW_H, _ROW_H)
+        self.btn_remove_provider.setToolTip("删除服务商")
+        self.btn_remove_provider.clicked.connect(self._remove_provider)
+        ch.addWidget(self.btn_remove_provider)
+
+        lay.addLayout(self._form_row("当前服务商", combo_w))
+        lay.addSpacing(_ROW_GAP)
+
+        # 动态详情容器
+        self._ai_detail = QWidget()
+        self._ai_detail_lay = QVBoxLayout(self._ai_detail)
+        self._ai_detail_lay.setContentsMargins(0, 0, 0, 0)
+        self._ai_detail_lay.setSpacing(0)
+        lay.addWidget(self._ai_detail)
+
+        lay.addStretch()
+
+        enabled = ai_config.get_enabled_providers()
+        if enabled:
+            self.provider_combo.setCurrentIndex(0)
+            self._on_provider_changed(0)
+
+        return page
+
+    # ══════════════════════════════════════════════════════
+    #  PAGE 1 — Prompt（内联构建，不嵌入外部组件）
+    # ══════════════════════════════════════════════════════
+
+    def _build_prompt_page(self):
+        from qfluentwidgets import PushButton, PrimaryPushButton, LineEdit, TextEdit, RadioButton, CheckBox
+
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        outer = QWidget()
+        outer.setObjectName("rc_page_bg")
+        oh = QHBoxLayout(outer)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(0)
+        oh.addStretch(1)
+
+        wrapper = QWidget()
+        wrapper.setFixedWidth(650)
+        h = QHBoxLayout(wrapper)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+
+        oh.addWidget(wrapper)
+        oh.addStretch(1)
+
+        # ── 左栏：列表 ──
+        left = QWidget()
+        left.setFixedWidth(220)
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(16, _PAGE_TB, 12, 16)
+        ll.setSpacing(8)
+
+        self._prompt_list = QListWidget()
+        self._prompt_list.setObjectName("pm_list")
+        self._prompt_list.currentRowChanged.connect(self._on_prompt_selected)
+        ll.addWidget(self._prompt_list, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        btn_add = PushButton("新增")
+        btn_add.setIcon(qta.icon('mdi6.plus', color=ACCENT_PRIMARY))
+        btn_add.setFixedHeight(_ROW_H)
+        btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add.clicked.connect(self._add_prompt)
+        btn_row.addWidget(btn_add)
+        btn_del = PushButton("删除")
+        btn_del.setIcon(qta.icon('mdi6.trash-can', color=COLOR_ERROR))
+        btn_del.setFixedHeight(_ROW_H)
+        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_del.clicked.connect(self._delete_prompt)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch()
+        ll.addLayout(btn_row)
+        h.addWidget(left)
+
+        # 竖分割线
+        vline = QFrame()
+        vline.setFrameShape(QFrame.Shape.VLine)
+        vline.setFixedWidth(1)
+        vline.setStyleSheet(f"color:{_SEPARATOR};")
+        h.addWidget(vline)
+
+        # ── 右栏：编辑表单 ──
+        right_body = QWidget()
+        rl = QVBoxLayout(right_body)
+        rl.setContentsMargins(_PAGE_LR, _PAGE_TB, _PAGE_LR, _PAGE_TB)
+        rl.setSpacing(0)
+
+        # section: 标题
+        rl.addWidget(self._section("标题"))
+        rl.addSpacing(_SEC_GAP)
+
+        self._prompt_title = LineEdit()
+        self._prompt_title.setPlaceholderText("输入 Prompt 标题…")
+        self._prompt_title.setFixedHeight(_ROW_H)
+        rl.addWidget(self._prompt_title)
+        rl.addSpacing(_ROW_GAP)
+
+        lbl_tp = QLabel("类型")
+        lbl_tp.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        rl.addWidget(lbl_tp)
+        rl.addSpacing(4)
+        type_w = QWidget()
+        tw = QHBoxLayout(type_w)
+        tw.setContentsMargins(0, 0, 0, 0)
+        tw.setSpacing(16)
+        self._prompt_type_text = RadioButton("文本/识图 (Vision)")
+        self._prompt_type_text.setChecked(True)
+        tw.addWidget(self._prompt_type_text)
+        self._prompt_type_image = RadioButton("生图/重绘 (Image Gen)")
+        tw.addWidget(self._prompt_type_image)
+        tw.addStretch()
+        rl.addWidget(type_w)
+        rl.addSpacing(_BLOCK_GAP)
+
+
+        # section: Prompt 内容
+        rl.addWidget(self._section("Prompt 内容"))
+        rl.addSpacing(_SEC_GAP)
+
+        self._prompt_content = TextEdit()
+        self._prompt_content.setPlaceholderText("输入 Prompt 内容…")
+        self._prompt_content.setMinimumHeight(140)
+        rl.addWidget(self._prompt_content, 1)
+        rl.addSpacing(8)
+
+        self._prompt_status_lbl = QLabel()
+        self._prompt_status_lbl.setStyleSheet(f"color:{TEXT_TERTIARY}; font-size:11px;")
+        self._prompt_status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        rl.addWidget(self._prompt_status_lbl)
+
+        self._prompt_save_timer = QTimer(self)
+        self._prompt_save_timer.setSingleShot(True)
+        self._prompt_save_timer.setInterval(1000)
+        self._prompt_save_timer.timeout.connect(self._auto_save_prompt)
+
+        self._prompt_title.textChanged.connect(self._prompt_edit_changed)
+        self._prompt_content.textChanged.connect(self._prompt_edit_changed)
+        self._prompt_type_text.toggled.connect(self._prompt_edit_changed)
+        self._prompt_type_image.toggled.connect(self._prompt_edit_changed)
+
+        h.addWidget(right_body, 1)
+
+        page.setWidget(outer)
+        self._load_prompts()
+        return page
+
+    # ══════════════════════════════════════════════════════
+    #  PAGE 2 — 快捷键
+    # ══════════════════════════════════════════════════════
+
+    def _build_hotkey_page(self):
+        from qfluentwidgets import PushButton
+
+        page, lay = self._scroll_page()
+
+        # section: 全局快捷键
+        lay.addWidget(self._section("全局快捷键"))
+        lay.addSpacing(_SEC_GAP)
+
         self.screenshot_hotkey = QKeySequenceEdit()
         self.screenshot_hotkey.setMaximumSequenceLength(1)
         self.screenshot_hotkey.setKeySequence(QKeySequence(hotkey_manager.get('screenshot')))
-        global_layout.addRow("截图快捷键:", self.screenshot_hotkey)
-        
-        # 剪贴板悬浮面板快捷键
-        clipboard_hotkey_widget = QWidget()
-        clipboard_hotkey_layout = QHBoxLayout(clipboard_hotkey_widget)
-        clipboard_hotkey_layout.setContentsMargins(0, 0, 0, 0)
-        
+        self.screenshot_hotkey.setFixedWidth(180)
+        self.screenshot_hotkey.setFixedHeight(_ROW_H)
+        self._fix_key_edit(self.screenshot_hotkey)
+        lay.addLayout(self._form_row("截图快捷键", self.screenshot_hotkey))
+        lay.addSpacing(_ROW_GAP)
+
         self.clipboard_float_mode = QComboBox()
         self.clipboard_float_mode.addItems(["键盘快捷键", "鼠标侧键1", "鼠标侧键2"])
-        self.clipboard_float_mode.setFixedWidth(100)
-        
+        self.clipboard_float_mode.setFixedWidth(180)
+        self.clipboard_float_mode.setFixedHeight(_ROW_H)
+        lay.addLayout(self._form_row("剪贴板浮窗", self.clipboard_float_mode))
+        lay.addSpacing(_ROW_GAP)
+
         self.clipboard_float_hotkey = QKeySequenceEdit()
         self.clipboard_float_hotkey.setMaximumSequenceLength(1)
-        
-        clipboard_hotkey_layout.addWidget(self.clipboard_float_mode)
-        clipboard_hotkey_layout.addWidget(self.clipboard_float_hotkey)
-        
-        # 根据当前设置初始化控件
-        clipboard_float_key = hotkey_manager.get('clipboard_float')
-        if clipboard_float_key == 'mousex1':
-            self.clipboard_float_mode.setCurrentIndex(1)  # 鼠标侧键1
+        self.clipboard_float_hotkey.setFixedWidth(180)
+        self.clipboard_float_hotkey.setFixedHeight(_ROW_H)
+        self._fix_key_edit(self.clipboard_float_hotkey)
+        lay.addLayout(self._form_row("浮窗快捷键", self.clipboard_float_hotkey))
+        lay.addLayout(self._form_row("", self._tip("选择鼠标侧键或直接在键盘快捷键框中按键设置")))
+
+        cfk = hotkey_manager.get('clipboard_float')
+        if cfk == 'mousex1':
+            self.clipboard_float_mode.setCurrentIndex(1)
             self.clipboard_float_hotkey.setKeySequence(QKeySequence())
             self.clipboard_float_hotkey.setEnabled(False)
-        elif clipboard_float_key == 'mousex2':
-            self.clipboard_float_mode.setCurrentIndex(2)  # 鼠标侧键2
+        elif cfk == 'mousex2':
+            self.clipboard_float_mode.setCurrentIndex(2)
             self.clipboard_float_hotkey.setKeySequence(QKeySequence())
             self.clipboard_float_hotkey.setEnabled(False)
         else:
-            self.clipboard_float_mode.setCurrentIndex(0)  # 键盘快捷键
-            self.clipboard_float_hotkey.setKeySequence(QKeySequence(clipboard_float_key))
+            self.clipboard_float_mode.setCurrentIndex(0)
+            self.clipboard_float_hotkey.setKeySequence(QKeySequence(cfk))
             self.clipboard_float_hotkey.setEnabled(True)
-        
-        # 连接信号
         self.clipboard_float_mode.currentIndexChanged.connect(self._on_clipboard_float_mode_changed)
-        
-        global_layout.addRow("剪贴板浮窗:", clipboard_hotkey_widget)
-        
-        # 说明文本
-        clipboard_tip = QLabel("选择鼠标侧键或直接在键盘快捷键框中按键设置")
-        clipboard_tip.setStyleSheet(f"color: {TEXT_TERTIARY}; font-size: 11px; margin-left: 10px;")
-        global_layout.addRow("", clipboard_tip)
-        
-        hotkey_layout_main.addWidget(global_group)
-        
-        # 截图窗口快捷键 - 使用滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setSpacing(10)
-        
-        # 存储所有快捷键输入框
+        lay.addSpacing(_BLOCK_GAP)
+
+        # 截图窗口快捷键
         self._hotkey_edits = {}
-        
-        screenshot_hotkeys = hotkey_manager.get_screenshot_hotkeys()
-        for category, actions in screenshot_hotkeys.items():
-            group = QGroupBox(f"截图窗口 - {category}")
-            form_layout = QFormLayout(group)
-            form_layout.setSpacing(8)
-            
+        for category, actions in hotkey_manager.get_screenshot_hotkeys().items():
+            lay.addWidget(self._section(f"截图窗口 · {category}"))
+            lay.addSpacing(_SEC_GAP)
             for action, hotkey in actions.items():
                 edit = QKeySequenceEdit()
                 edit.setMaximumSequenceLength(1)
                 edit.setKeySequence(QKeySequence(hotkey))
-                edit.setFixedWidth(150)
-                
-                action_name = hotkey_manager.get_action_name(action)
-                form_layout.addRow(f"{action_name}:", edit)
+                edit.setFixedWidth(180)
+                edit.setFixedHeight(_ROW_H)
+                self._fix_key_edit(edit)
+                lay.addLayout(self._form_row(hotkey_manager.get_action_name(action), edit))
+                lay.addSpacing(6)
                 self._hotkey_edits[(category, action)] = edit
-            
-            scroll_layout.addWidget(group)
-        
-        scroll_layout.addStretch()
-        scroll_area.setWidget(scroll_content)
-        hotkey_layout_main.addWidget(scroll_area)
-        
-        # 重置按钮
+            lay.addSpacing(18)
+
         reset_btn = PushButton("恢复默认快捷键")
-
+        reset_btn.setFixedHeight(_ROW_H)
         reset_btn.clicked.connect(self._reset_hotkeys)
-        reset_btn.setFixedWidth(120)
-        
-        reset_layout = QHBoxLayout()
-        reset_layout.addStretch()
-        reset_layout.addWidget(reset_btn)
-        hotkey_layout_main.addLayout(reset_layout)
-        
-        self.tab_widget.addTab(hotkey_tab, "快捷键")
-        
-        # === 通用设置标签页 ===
-        general_tab = QWidget()
-        general_layout = QVBoxLayout(general_tab)
-        general_layout.setSpacing(12)
-        
-        # 启动设置
-        startup_group = QGroupBox("启动设置")
-        startup_layout = QVBoxLayout(startup_group)
-        startup_layout.setSpacing(10)
-        
+        lay.addWidget(reset_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        lay.addStretch()
+        return page
+
+    # ══════════════════════════════════════════════════════
+    #  PAGE 3 — 通用
+    # ══════════════════════════════════════════════════════
+
+    def _build_general_page(self):
+        from qfluentwidgets import CheckBox, ComboBox
+
+        page, lay = self._scroll_page()
+
+        # section: 启动
+        lay.addWidget(self._section("启动"))
+        lay.addSpacing(_SEC_GAP)
         self.autostart_checkbox = CheckBox("开机自动启动")
-
         self.autostart_checkbox.setChecked(is_autostart_enabled())
-        startup_layout.addWidget(self.autostart_checkbox)
-        
-        startup_tip = QLabel("启用后，系统启动时会自动运行 Artco")
-        startup_tip.setStyleSheet(f"color: {TEXT_TERTIARY}; font-size: 11px; margin-left: 20px;")
+        lay.addWidget(self.autostart_checkbox)
+        lay.addSpacing(4)
+        tip1 = self._tip("启用后，系统启动时会自动运行 Artco")
+        tip1.setContentsMargins(24, 0, 0, 0)
+        lay.addWidget(tip1)
+        lay.addSpacing(_BLOCK_GAP)
 
-        startup_layout.addWidget(startup_tip)
-        
-        general_layout.addWidget(startup_group)
+        # section: 屏幕贴图
+        lay.addWidget(self._section("屏幕贴图"))
+        lay.addSpacing(_SEC_GAP)
+        self.crop_shrink_checkbox = CheckBox("双击时启用裁剪缩小（参考 Setuna）")
+        self.crop_shrink_checkbox.setToolTip("双击屏幕贴图时，使用鼠标拖拽选择区域进行裁剪，而非整体缩小")
+        self.crop_shrink_checkbox.setChecked(ps_config.get_crop_shrink_enabled())
+        lay.addWidget(self.crop_shrink_checkbox)
+        lay.addSpacing(4)
+        tip2 = self._tip("启用后，双击屏幕贴图会进入裁剪模式")
+        tip2.setContentsMargins(24, 0, 0, 0)
+        lay.addWidget(tip2)
+        lay.addSpacing(14)
 
-        # 协作设置
-        collab_group = QGroupBox("协作设置")
-        collab_layout = QFormLayout(collab_group)
-        collab_layout.setSpacing(10)
+        lbl_sz = QLabel("缩略图大小")
+        lbl_sz.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_sz)
+        lay.addSpacing(4)
+        self.thumbnail_size_combo = ComboBox()
+        self.thumbnail_size_combo.addItems(["32x32", "48x48", "64x64", "96x96", "128x128"])
+        cur = ps_config.get_thumbnail_size()
+        self.thumbnail_size_combo.setCurrentIndex({32: 0, 48: 1, 64: 2, 96: 3, 128: 4}.get(cur, 2))
+        self.thumbnail_size_combo.setFixedHeight(_ROW_H)
+        self.thumbnail_size_combo.setFixedWidth(140)
+        lay.addWidget(self.thumbnail_size_combo)
 
-        self.vendor_company_input = LineEdit()
-        self.vendor_company_input.setPlaceholderText("供应商公司名称（用于提交到 _INBOX 分流）")
-        self.vendor_company_input.setText(workspace_config.get_vendor_company())
-        collab_layout.addRow("供应商公司:", self.vendor_company_input)
+        lay.addStretch()
+        return page
 
-        general_layout.addWidget(collab_group)
-        general_layout.addStretch()
-        
-        self.tab_widget.addTab(general_tab, "通用")
-        
+    # ══════════════════════════════════════════════════════
+    #  AI 服务商
+    # ══════════════════════════════════════════════════════
 
-        
-        layout.addWidget(self.tab_widget)
-        
-        # 按钮区域
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        
-        self.btn_save = PrimaryPushButton("保存")
+    def _refresh_provider_combo(self):
+        from config import AI_PROVIDERS
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.clear()
+        for pid in ai_config.get_enabled_providers():
+            if pid in AI_PROVIDERS:
+                self.provider_combo.addItem(AI_PROVIDERS[pid]["name"], pid)
+        self.provider_combo.blockSignals(False)
 
-        self.btn_save.setFixedWidth(80)
-        self.btn_save.clicked.connect(self._save_settings)
-        
-        self.btn_cancel = PushButton("取消")
+    def _on_provider_changed(self, index: int):
+        enabled = ai_config.get_enabled_providers()
+        if index < 0 or index >= len(enabled):
+            return
+        pid = enabled[index]
+        self._current_provider_detail = pid
+        self._show_provider_detail(pid)
 
-        self.btn_cancel.setFixedWidth(80)
-        self.btn_cancel.clicked.connect(self.reject)
-        
-        btn_layout.addWidget(self.btn_save)
-        btn_layout.addWidget(self.btn_cancel)
-        layout.addLayout(btn_layout)
-        
-        self.setStyleSheet(get_group_box_style() + f"""
-            QDialog {{
-                background-color: {BG_PRIMARY};
-            }}
-            QTabWidget::pane {{
-                border: 1px solid {BORDER_DEFAULT};
-                border-radius: {RADIUS_SM}px;
-                background-color: {BG_SECONDARY};
-            }}
-            QTabBar::tab {{
-                padding: 8px 16px;
-                border: 1px solid {BORDER_DEFAULT};
-                border-bottom: none;
-                border-radius: {RADIUS_SM}px {RADIUS_SM}px 0 0;
-                background-color: {BG_ACTIVE};
-            }}
-            QTabBar::tab:selected {{
-                background-color: {BG_SECONDARY};
-                border-bottom: 1px solid {BG_SECONDARY};
-            }}
-        """)
+    def _show_provider_detail(self, provider_id):
+        from config import AI_PROVIDERS
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        from qfluentwidgets import LineEdit, PushButton, ComboBox
 
+        self._clear_layout(self._ai_detail_lay)
 
+        provider = AI_PROVIDERS.get(provider_id)
+        if not provider:
+            return
 
-    
-    def _on_task_type_changed(self, index):
-        """任务类型改变时更新模型列表"""
-        self._update_model_list()
-    
-    def show_tab(self, tab_id: str):
-        """切换到指定的标签页
-        
-        Args:
-            tab_id: 标签页ID ('ai', 'hotkey', 'general', 'wecom')
-        """
-        tab_mapping = {
-            'ai': 'AI 设置',
-            'hotkey': '快捷键',
-            'general': '通用'
-        }
-        
-        tab_name = tab_mapping.get(tab_id)
-        if tab_name:
-            for i in range(self.tab_widget.count()):
-                if self.tab_widget.tabText(i) == tab_name:
-                    self.tab_widget.setCurrentIndex(i)
-                    break
-    
-    def _update_model_list(self):
-        """更新模型下拉列表"""
-        self.model_combo.clear()
-        task_type = self.task_type_combo.currentData() or "vision"
-        models = AI_MODELS.get(task_type) or AI_MODELS.get("vision", [])
-        
-        for model in models:
-            self.model_combo.addItem(model["name"], model["id"])
-        
-        # 恢复之前选择的模型
-        if task_type == "vision":
-            current_model = ai_config.get("vision_model", "gemini-2.5-flash")
+        L = self._ai_detail_lay
+        is_current = provider_id == ai_config.get_current_provider_selected()
+
+        # 默认状态
+        if is_current:
+            st = QLabel("✓ 当前默认服务商")
+            st.setStyleSheet("color:#52c41a; font-size:13px; font-weight:500;")
+            L.addLayout(self._form_row("", st))
         else:
-            current_model = ai_config.get("image_gen_model", "gemini-2.5-flash")
-        
-        index = self.model_combo.findData(current_model)
-        if index >= 0:
-            self.model_combo.setCurrentIndex(index)
-        elif self.model_combo.count() > 0:
-            self.model_combo.setCurrentIndex(0)
+            self._btn_set_default = PushButton("设为默认服务商")
+            self._btn_set_default.setFixedHeight(_ROW_H)
+            self._btn_set_default.clicked.connect(lambda: self._set_default_provider(provider_id))
+            L.addLayout(self._form_row("", self._btn_set_default))
+
+        L.addSpacing(_BLOCK_GAP)
+
+        # section: 连接
+        L.addWidget(self._section("连接"))
+        L.addSpacing(_SEC_GAP)
+
+        key_w = QWidget()
+        kh = QHBoxLayout(key_w)
+        kh.setContentsMargins(0, 0, 0, 0)
+        kh.setSpacing(8)
+        self._provider_key_input = LineEdit()
+        self._provider_key_input.setPlaceholderText(f"输入 {provider['name']} API Key")
+        self._provider_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._provider_key_input.setText(ai_config.get_api_key(provider_id))
+        self._provider_key_input.setFixedHeight(_ROW_H)
+        kh.addWidget(self._provider_key_input, 1)
+        self._btn_verify_key = PushButton("验证")
+        self._btn_verify_key.setFixedHeight(_ROW_H)
+        self._btn_verify_key.setFixedWidth(72)
+        self._btn_verify_key.clicked.connect(self._verify_provider_key)
+        kh.addWidget(self._btn_verify_key)
+        L.addLayout(self._form_row("API Key", key_w))
+        L.addSpacing(_ROW_GAP)
+
+        self._provider_base_url = LineEdit()
+        self._provider_base_url.setPlaceholderText("自定义 API 地址（可选）")
+        self._provider_base_url.setText(ai_config.get_api_base_url(provider_id))
+        self._provider_base_url.setFixedHeight(_ROW_H)
+        L.addLayout(self._form_row("Base URL", self._provider_base_url))
+        L.addSpacing(_BLOCK_GAP)
+
+        # section: 模型
+        L.addWidget(self._section("模型"))
+        L.addSpacing(_SEC_GAP)
+
+        all_vision = ai_config.get(f"{provider_id}_vision_models", [])
+        if not all_vision:
+            all_vision = [m.get("name", m["id"]) for m in AI_MODELS.get("vision", []) if m.get("provider") == provider_id]
+
+        self._vision_model_combo = ComboBox()
+        self._vision_model_combo.setFixedHeight(_ROW_H)
+        for mid in all_vision:
+            dn = mid
+            for m in AI_MODELS.get("vision", []):
+                if m["id"] == mid:
+                    dn = m.get("name", mid)
+                    break
+            self._vision_model_combo.addItem(dn)
+            self._vision_model_combo.setItemData(self._vision_model_combo.count() - 1, mid)
+        saved_v = ai_config.get("vision_model", provider.get("default_vision"))
+        idx = self._vision_model_combo.findData(saved_v)
+        self._vision_model_combo.setCurrentIndex(max(idx, 0))
+        L.addLayout(self._form_row("视觉分析模型", self._vision_model_combo))
+        L.addSpacing(_ROW_GAP)
+
+        all_img = ai_config.get(f"{provider_id}_image_gen_models", [])
+        if not all_img:
+            defs = [m for m in AI_MODELS.get("image_gen", []) if m.get("provider") == provider_id]
+            if defs:
+                all_img = [m["id"] for m in defs]
+
+        self._image_gen_model_combo = ComboBox()
+        self._image_gen_model_combo.setFixedHeight(_ROW_H)
+        if all_img:
+            for mid in all_img:
+                dn = mid
+                for m in AI_MODELS.get("image_gen", []):
+                    if m["id"] == mid:
+                        dn = m.get("name", mid)
+                        break
+                self._image_gen_model_combo.addItem(dn)
+                self._image_gen_model_combo.setItemData(self._image_gen_model_combo.count() - 1, mid)
+            saved_ig = ai_config.get("image_gen_model", provider.get("default_image_gen"))
+            idx = self._image_gen_model_combo.findData(saved_ig)
+            self._image_gen_model_combo.setCurrentIndex(max(idx, 0))
+        else:
+            self._image_gen_model_combo.addItem("无可用模型", "")
+            self._image_gen_model_combo.setEnabled(False)
+        L.addLayout(self._form_row("图像生成模型", self._image_gen_model_combo))
+        L.addSpacing(_BLOCK_GAP)
+
+        # 获取 key 链接
+        self._key_url = provider["key_url"]
+        link = PushButton(f"获取 {provider['name']} API Key →")
+        link.setFixedHeight(_ROW_H)
+        link.setCursor(Qt.CursorShape.PointingHandCursor)
+        link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self._key_url)))
+        L.addLayout(self._form_row("", link))
+        L.addStretch()
+
+    def _add_provider(self):
+        from config import AI_PROVIDERS
+        enabled = ai_config.get_enabled_providers()
+        available = [p for p in AI_PROVIDERS if p not in enabled]
+        if not available:
+            QMessageBox.information(self, "提示", "所有服务商已添加")
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLE)
+        for pid in available:
+            a = menu.addAction(AI_PROVIDERS[pid]["name"])
+            a.setData(pid)
+        pos = self.btn_add_provider.mapToGlobal(QPoint(0, self.btn_add_provider.height()))
+        a = menu.exec(pos)
+        if a:
+            ai_config.add_provider(a.data())
+            self._refresh_provider_combo()
+            self.provider_combo.setCurrentIndex(self.provider_combo.count() - 1)
+
+    def _remove_provider(self):
+        idx = self.provider_combo.currentIndex()
+        if idx < 0:
+            return
+        enabled = ai_config.get_enabled_providers()
+        if idx >= len(enabled):
+            return
+        pid = enabled[idx]
+        from config import AI_PROVIDERS
+        name = AI_PROVIDERS.get(pid, {}).get("name", pid)
+        if QMessageBox.question(
+            self, "确认删除", f'确定要删除服务商 "{name}" 吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            ai_config.remove_provider(pid)
+            self._refresh_provider_combo()
+            if self.provider_combo.count() > 0:
+                self.provider_combo.setCurrentIndex(0)
+
+    def _set_default_provider(self, provider_id):
+        from config import AI_PROVIDERS
+        ai_config.set_current_provider_selected(provider_id)
+        self._show_provider_detail(provider_id)
+        QMessageBox.information(self, "成功", f"已将 {AI_PROVIDERS[provider_id]['name']} 设为默认服务商")
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
+    # ══════════════════════════════════════════════════════
+    #  Prompt 数据操作
+    # ══════════════════════════════════════════════════════
+
+    def _load_prompts(self):
+        from PySide6.QtWidgets import QCheckBox
+        self._prompt_list.clear()
+        self._prompt_data = get_all_prompts()
+        self._prompt_default_cbs = []
+
+        cb_style = (
+            f"QCheckBox {{ spacing: 0px; }}"
+            f"QCheckBox::indicator {{ width: 14px; height: 14px; }}"
+        )
+
+        for p in self._prompt_data:
+            pt = p.get("prompt_type", "text")
+            icon_name = 'mdi6.text-box-outline' if pt == "text" else 'mdi6.image-outline'
+
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, p["id"])
+            item.setSizeHint(QSize(0, 42))
+            self._prompt_list.addItem(item)
+
+            row_w = _PromptRow(p["is_default"])
+            rl = QHBoxLayout(row_w)
+            rl.setContentsMargins(10, 0, 8, 0)
+            rl.setSpacing(8)
+
+            icon_lbl = QLabel()
+            icon_lbl.setPixmap(qta.icon(icon_name, color=TEXT_TERTIARY).pixmap(QSize(18, 18)))
+            icon_lbl.setFixedSize(18, 18)
+            rl.addWidget(icon_lbl)
+
+            title_lbl = QLabel(p["title"])
+            title_lbl.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:14px;")
+            rl.addWidget(title_lbl, 1)
+
+            cb = QCheckBox()
+            cb.setChecked(p["is_default"])
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            cb.setToolTip("默认")
+            cb.setStyleSheet(cb_style)
+            cb.setFixedSize(18, 18)
+            if not p["is_default"]:
+                cb.setVisible(False)
+            pid = p["id"]
+            cb.toggled.connect(lambda checked, _pid=pid: self._toggle_default(_pid, checked))
+            rl.addWidget(cb)
+            row_w.cb = cb
+            self._prompt_default_cbs.append((pid, cb))
+
+            self._prompt_list.setItemWidget(item, row_w)
+
+        if self._prompt_list.count() > 0:
+            self._prompt_list.setCurrentRow(0)
+
+    def _toggle_default(self, prompt_id, checked):
+        if not checked:
+            for p in self._prompt_data:
+                if p["id"] == prompt_id:
+                    p["is_default"] = False
+                    update_prompt(p["id"], p["title"], p["content"], False, p.get("prompt_type", "text"))
+                    break
+            return
+        for pid, cb in self._prompt_default_cbs:
+            if pid != prompt_id:
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.setVisible(False)
+                cb.blockSignals(False)
+        for p in self._prompt_data:
+            if p["id"] == prompt_id:
+                p["is_default"] = True
+                update_prompt(p["id"], p["title"], p["content"], True, p.get("prompt_type", "text"))
+            elif p["is_default"]:
+                p["is_default"] = False
+                update_prompt(p["id"], p["title"], p["content"], False, p.get("prompt_type", "text"))
+
+    def _on_prompt_selected(self, row: int):
+        self._prompt_save_timer.stop()
+        self._prompt_loading = True
+        if row < 0 or row >= len(self._prompt_data):
+            self._prompt_current_id = None
+            self._prompt_title.clear()
+            self._prompt_content.clear()
+            self._prompt_type_text.setChecked(True)
+            self._prompt_loading = False
+            return
+        p = self._prompt_data[row]
+        self._prompt_current_id = p["id"]
+        self._prompt_title.setText(p["title"])
+        self._prompt_content.setPlainText(p["content"])
+        if p.get("prompt_type", "text") == "image":
+            self._prompt_type_image.setChecked(True)
+        else:
+            self._prompt_type_text.setChecked(True)
+        self._prompt_loading = False
+        self._prompt_status_lbl.setText("")
+
+    def _add_prompt(self):
+        new_id = add_prompt("新建 Prompt", "请输入 Prompt 内容...", prompt_type="text")
+        self._load_prompts()
+        for i in range(self._prompt_list.count()):
+            if self._prompt_list.item(i).data(Qt.ItemDataRole.UserRole) == new_id:
+                self._prompt_list.setCurrentRow(i)
+                break
+        self._prompt_title.setFocus()
+        self._prompt_title.selectAll()
+
+    def _delete_prompt(self):
+        if not self._prompt_current_id:
+            return
+        if QMessageBox.question(
+            self, "确认删除", "确定要删除这个 Prompt 吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            delete_prompt(self._prompt_current_id)
+            self._load_prompts()
+
+    def _prompt_edit_changed(self):
+        if not self._prompt_current_id:
+            return
+        if getattr(self, '_prompt_loading', False):
+            return
+        self._prompt_save_timer.start()
+
+    def _auto_save_prompt(self):
+        if not self._prompt_current_id:
+            return
+        title = self._prompt_title.text().strip()
+        content = self._prompt_content.toPlainText().strip()
+        if not title or not content:
+            return
+        is_default = False
+        for p in self._prompt_data:
+            if p["id"] == self._prompt_current_id:
+                is_default = p["is_default"]
+                break
+        pt = "image" if self._prompt_type_image.isChecked() else "text"
+        update_prompt(self._prompt_current_id, title, content, is_default, pt)
+        cur = self._prompt_list.currentRow()
+        self._prompt_loading = True
+        self._load_prompts()
+        if cur < self._prompt_list.count():
+            self._prompt_list.setCurrentRow(cur)
+        self._prompt_loading = False
+        self._prompt_status_lbl.setText("已自动保存")
+        QTimer.singleShot(2000, lambda: self._prompt_status_lbl.setText(""))
+
+    # ══════════════════════════════════════════════════════
+    #  验证 API Key
+    # ══════════════════════════════════════════════════════
+
+    def _verify_provider_key(self):
+        if not self._current_provider_detail:
+            return
+        provider_id = self._current_provider_detail
+        api_key = self._provider_key_input.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "验证失败", "请输入 API Key")
+            return
+        self._btn_verify_key.setEnabled(False)
+        self._btn_verify_key.setText("验证中…")
+        try:
+            verify_map = {
+                "google": self._verify_google_key,
+                "openai": self._verify_openai_key,
+                "anthropic": self._verify_anthropic_key,
+                "seedream": self._verify_seedream_key,
+            }
+            fn = verify_map.get(provider_id)
+            if fn:
+                success, message, models = fn(api_key)
+            else:
+                success, message, models = False, f"未知服务商: {provider_id}", []
+
+            if success:
+                QMessageBox.information(self, "验证成功", f"API Key 验证通过！\n{message}")
+                ai_config.set_api_key(provider_id, api_key)
+                if hasattr(self, '_provider_base_url'):
+                    ai_config.set_api_base_url(provider_id, self._provider_base_url.text().strip())
+                ai_config.set(f"{provider_id}_vision_models", models.get("vision", []))
+                ai_config.set(f"{provider_id}_image_gen_models", models.get("image_gen", []))
+                self._show_provider_detail(provider_id)
+            else:
+                QMessageBox.warning(self, "验证失败", f"API Key 无效：\n{message}")
+        except Exception as e:
+            QMessageBox.critical(self, "验证错误", f"验证过程出错：\n{str(e)}")
+        finally:
+            self._btn_verify_key.setEnabled(True)
+            self._btn_verify_key.setText("验证")
+
+    def _verify_google_key(self, api_key):
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            all_models = []
+            for model in client.models.list():
+                fn = model.name if hasattr(model, 'name') else str(model)
+                all_models.append(fn[7:] if fn.startswith("models/") else fn)
+            return True, f"有效 Key，共发现 {len(all_models)} 个模型", {"vision": all_models, "image_gen": all_models}
+        except Exception as e:
+            import requests
+            try:
+                resp = requests.get(f"https://generativelanguage.googleapis.com/v1/models?key={api_key}", timeout=10)
+                if resp.status_code == 200:
+                    models = resp.json().get("models", [])
+                    all_m = [m.get("name", "").removeprefix("models/") for m in models]
+                    return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+                if resp.status_code == 401:
+                    return False, "无效的 API Key", {}
+                return False, f"API 返回错误: {resp.status_code}", {}
+            except Exception:
+                return False, f"验证失败: {e}", {}
+
+    def _verify_openai_key(self, api_key):
+        import requests
+        try:
+            resp = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
+            if resp.status_code == 200:
+                all_m = [m.get("id") for m in resp.json().get("data", [])]
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+            if resp.status_code == 401:
+                return False, "无效的 API Key", {}
+            return False, f"API 返回错误: {resp.status_code}", {}
+        except Exception as e:
+            return False, str(e), {}
+
+    def _verify_anthropic_key(self, api_key):
+        import requests
+        try:
+            resp = requests.get("https://api.anthropic.com/v1/models", headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout=10)
+            if resp.status_code == 200:
+                all_m = [m.get("id") for m in resp.json().get("data", [])]
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+            if resp.status_code == 401:
+                return False, "无效的 API Key", {}
+            return False, f"API 返回错误: {resp.status_code}", {}
+        except Exception as e:
+            return False, str(e), {}
+
+    def _verify_seedream_key(self, api_key):
+        import requests
+        try:
+            resp = requests.get("https://api.seedream.io/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
+            if resp.status_code == 200:
+                all_m = [m.get("id") for m in resp.json().get("data", [])]
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+            if resp.status_code == 401:
+                return False, "无效的 API Key", {}
+            return False, f"API 返回错误: {resp.status_code}", {}
+        except Exception as e:
+            return False, str(e), {}
+
+    # ══════════════════════════════════════════════════════
+    #  保存 / 重置
+    # ══════════════════════════════════════════════════════
+
     def _on_clipboard_float_mode_changed(self, index):
-        """剪贴板浮窗快捷键模式改变"""
-        if index == 0:  # 键盘快捷键
+        if index == 0:
             self.clipboard_float_hotkey.setEnabled(True)
-            # 如果之前是清空的，可以设置一个默认序列，但这里不设置
-        else:  # 鼠标侧键1或2
+        else:
             self.clipboard_float_hotkey.setEnabled(False)
             self.clipboard_float_hotkey.setKeySequence(QKeySequence())
-    
+
     def _save_settings(self):
-        # 保存 AI 设置
-        task_type = self.task_type_combo.currentData()
-        model_id = self.model_combo.currentData()
-        
-        ai_config.set("task_type", task_type)
-        if task_type == "vision":
-            ai_config.set("vision_model", model_id)
-        else:
-            ai_config.set("image_gen_model", model_id)
-        
-        # 保存 API Keys
-        ai_config.set_api_key("google", self.google_key_input.text().strip())
-        ai_config.set_api_key("openai", self.openai_key_input.text().strip())
-        ai_config.set_api_key("anthropic", self.anthropic_key_input.text().strip())
-        
-        # 保存 API Base URLs
-        ai_config.set_api_base_url("google", self.google_base_url.text().strip())
-        ai_config.set_api_base_url("openai", self.openai_base_url.text().strip())
-        ai_config.set_api_base_url("anthropic", self.anthropic_base_url.text().strip())
-        
-        # 保存快捷键设置
+        # AI
+        if self._current_provider_detail and hasattr(self, '_provider_key_input'):
+            pid = self._current_provider_detail
+            ai_config.set_api_key(pid, self._provider_key_input.text().strip())
+            if hasattr(self, '_provider_base_url'):
+                ai_config.set_api_base_url(pid, self._provider_base_url.text().strip())
+            if hasattr(self, '_vision_model_combo'):
+                v = self._vision_model_combo.currentData()
+                if v:
+                    ai_config.set("vision_model", v)
+            if hasattr(self, '_image_gen_model_combo'):
+                v = self._image_gen_model_combo.currentData()
+                if v:
+                    ai_config.set("image_gen_model", v)
+
+        # 快捷键
         seq = self.screenshot_hotkey.keySequence()
-        hotkey_str = seq.toString() if not seq.isEmpty() else ''
-        
-        old_hotkey = hotkey_manager.get('screenshot')
-        hotkey_manager.set('screenshot', hotkey_str)
-        
-        if old_hotkey != hotkey_str:
+        hs = seq.toString() if not seq.isEmpty() else ''
+        old = hotkey_manager.get('screenshot')
+        hotkey_manager.set('screenshot', hs)
+        if old != hs:
             self.hotkey_changed.emit()
-        
-        # 保存剪贴板浮窗快捷键
-        mode_index = self.clipboard_float_mode.currentIndex()
-        if mode_index == 0:  # 键盘快捷键
+
+        mi = self.clipboard_float_mode.currentIndex()
+        if mi == 0:
             seq = self.clipboard_float_hotkey.keySequence()
-            clipboard_float_str = seq.toString() if not seq.isEmpty() else ''
-        elif mode_index == 1:  # 鼠标侧键1
-            clipboard_float_str = 'mousex1'
-        else:  # 鼠标侧键2
-            clipboard_float_str = 'mousex2'
-        
-        old_clipboard_float = hotkey_manager.get('clipboard_float')
-        hotkey_manager.set('clipboard_float', clipboard_float_str)
-        
-        if old_clipboard_float != clipboard_float_str:
+            cfs = seq.toString() if not seq.isEmpty() else ''
+        elif mi == 1:
+            cfs = 'mousex1'
+        else:
+            cfs = 'mousex2'
+        old_cf = hotkey_manager.get('clipboard_float')
+        hotkey_manager.set('clipboard_float', cfs)
+        if old_cf != cfs:
             self.hotkey_changed.emit()
-        
-        # 保存截图窗口快捷键
-        for (category, action), edit in self._hotkey_edits.items():
+
+        for (cat, act), edit in self._hotkey_edits.items():
             seq = edit.keySequence()
-            hotkey_str = seq.toString() if not seq.isEmpty() else ''
-            hotkey_manager.set_screenshot_hotkey(category, action, hotkey_str)
-        
-        # 使快捷键缓存失效
+            hotkey_manager.set_screenshot_hotkey(cat, act, seq.toString() if not seq.isEmpty() else '')
+
         try:
             from screenshot.cache import invalidate_hotkey_cache
             invalidate_hotkey_cache()
         except ImportError:
             pass
-        
-        # 保存开机启动设置
-        autostart_enabled = self.autostart_checkbox.isChecked()
-        if autostart_enabled != is_autostart_enabled():
-            if not set_autostart(autostart_enabled):
+
+        ae = self.autostart_checkbox.isChecked()
+        if ae != is_autostart_enabled():
+            if not set_autostart(ae):
                 QMessageBox.warning(self, "警告", "开机启动设置失败，请以管理员权限运行")
 
-        # 保存协作设置
         try:
-            vendor_company = self.vendor_company_input.text().strip() if hasattr(self, "vendor_company_input") else ""
-            workspace_config.set_vendor_company(vendor_company)
+            ps_config.set_crop_shrink_enabled(self.crop_shrink_checkbox.isChecked())
+            ps_config.set_thumbnail_size({0: 32, 1: 48, 2: 64, 3: 96, 4: 128}.get(self.thumbnail_size_combo.currentIndex(), 64))
         except Exception:
             pass
-        
+
         QMessageBox.information(self, "成功", "设置已保存")
         self.accept()
-    
+
     def _reset_hotkeys(self):
-        """恢复默认快捷键"""
-        reply = QMessageBox.question(
+        if QMessageBox.question(
             self, "确认", "确定要恢复所有快捷键为默认值吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
             return
-        
-        # 恢复全局快捷键
-        default_screenshot = hotkey_manager.DEFAULT_HOTKEYS.get('screenshot', 'F1')
-        self.screenshot_hotkey.setKeySequence(QKeySequence(default_screenshot))
-        
-        default_clipboard_float = hotkey_manager.DEFAULT_HOTKEYS.get('clipboard_float', 'mousex1')
-        if default_clipboard_float == 'mousex1':
-            self.clipboard_float_mode.setCurrentIndex(1)  # 鼠标侧键1
+        self.screenshot_hotkey.setKeySequence(QKeySequence(hotkey_manager.DEFAULT_HOTKEYS.get('screenshot', 'F1')))
+        dcf = hotkey_manager.DEFAULT_HOTKEYS.get('clipboard_float', 'mousex1')
+        if dcf == 'mousex1':
+            self.clipboard_float_mode.setCurrentIndex(1)
             self.clipboard_float_hotkey.setKeySequence(QKeySequence())
             self.clipboard_float_hotkey.setEnabled(False)
-        elif default_clipboard_float == 'mousex2':
-            self.clipboard_float_mode.setCurrentIndex(2)  # 鼠标侧键2
+        elif dcf == 'mousex2':
+            self.clipboard_float_mode.setCurrentIndex(2)
             self.clipboard_float_hotkey.setKeySequence(QKeySequence())
             self.clipboard_float_hotkey.setEnabled(False)
         else:
-            self.clipboard_float_mode.setCurrentIndex(0)  # 键盘快捷键
-            self.clipboard_float_hotkey.setKeySequence(QKeySequence(default_clipboard_float))
+            self.clipboard_float_mode.setCurrentIndex(0)
+            self.clipboard_float_hotkey.setKeySequence(QKeySequence(dcf))
             self.clipboard_float_hotkey.setEnabled(True)
-        
-        # 恢复截图窗口快捷键
-        for (category, action), edit in self._hotkey_edits.items():
-            default_hotkey = hotkey_manager.DEFAULT_SCREENSHOT_HOTKEYS.get(category, {}).get(action, '')
-            edit.setKeySequence(QKeySequence(default_hotkey))
-    
+        for (cat, act), edit in self._hotkey_edits.items():
+            dh = hotkey_manager.DEFAULT_SCREENSHOT_HOTKEYS.get(cat, {}).get(act, '')
+            edit.setKeySequence(QKeySequence(dh))
+
+    # ══════════════════════════════════════════════════════
+    #  Webhook（保留接口）
+    # ══════════════════════════════════════════════════════
+
     def _load_webhooks(self):
-        """加载已配置的 Webhook"""
-        # 清空列表
+        if not hasattr(self, 'webhook_list_layout'):
+            return
         while self.webhook_list_layout.count():
             item = self.webhook_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
         webhooks = wecom_config.get_webhooks()
-        
         if not webhooks:
-            empty_label = QLabel("暂无配置，请添加企微群 Webhook")
-            empty_label.setStyleSheet("color: #888; padding: 20px; font-size: 12px;")
-            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.webhook_list_layout.addWidget(empty_label)
+            el = QLabel("暂无配置，请添加企微群 Webhook")
+            el.setStyleSheet("color:#888;padding:20px;font-size:12px;")
+            el.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.webhook_list_layout.addWidget(el)
             return
-        
         for wh in webhooks:
             row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 4, 4, 4)
-            row_layout.setSpacing(8)
-            
-            name_label = QLabel(wh["name"])
-            name_label.setFixedWidth(120)
-            name_label.setStyleSheet("font-weight: bold;")
-            row_layout.addWidget(name_label)
-            
-            # 显示 URL（脱敏）
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(4, 4, 4, 4)
+            rl.setSpacing(8)
+            nl = QLabel(wh["name"])
+            nl.setFixedWidth(120)
+            nl.setStyleSheet("font-weight:bold;")
+            rl.addWidget(nl)
             url = wh["url"]
-            if len(url) > 50:
-                display_url = url[:30] + "..." + url[-15:]
-            else:
-                display_url = url
-            url_label = QLabel(display_url)
-            url_label.setStyleSheet("color: #666; font-size: 11px;")
-            url_label.setToolTip(url)
-            row_layout.addWidget(url_label, 1)
-            
-            # 删除按钮
-            btn_del = QPushButton("删除")
-            btn_del.setFixedWidth(50)
-            btn_del.setProperty("webhook_name", wh["name"])
-            btn_del.clicked.connect(self._remove_webhook)
-            row_layout.addWidget(btn_del)
-            
+            disp = url[:30] + "..." + url[-15:] if len(url) > 50 else url
+            ul = QLabel(disp)
+            ul.setStyleSheet("color:#666;font-size:11px;")
+            ul.setToolTip(url)
+            rl.addWidget(ul, 1)
+            bd = QPushButton("删除")
+            bd.setFixedWidth(50)
+            bd.setProperty("webhook_name", wh["name"])
+            bd.clicked.connect(self._remove_webhook)
+            rl.addWidget(bd)
             self.webhook_list_layout.addWidget(row)
-    
+
     def _add_webhook(self):
-        """添加 Webhook"""
         name = self.webhook_name_input.text().strip()
         url = self.webhook_url_input.text().strip()
-        
         if not name:
             QMessageBox.warning(self, "提示", "请输入群名称")
             return
-        
         if not url:
             QMessageBox.warning(self, "提示", "请输入 Webhook URL")
             return
-        
         if not url.startswith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"):
             QMessageBox.warning(self, "提示", "Webhook URL 格式不正确\n应以 https://qyapi.weixin.qq.com/cgi-bin/webhook/send 开头")
             return
-        
         wecom_config.add_webhook(name, url)
-        
-        # 清空输入
         self.webhook_name_input.clear()
         self.webhook_url_input.clear()
-        
-        # 刷新列表
         self._load_webhooks()
-        
         QMessageBox.information(self, "成功", f"已添加 Webhook：{name}")
-    
+
     def _remove_webhook(self):
-        """删除 Webhook"""
         btn = self.sender()
         name = btn.property("webhook_name")
-        
-        reply = QMessageBox.question(
-            self, "确认", f"确定要删除 \"{name}\" 吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        
-        wecom_config.remove_webhook(name)
-        self._load_webhooks()
+        if QMessageBox.question(
+            self, "确认", f'确定要删除 "{name}" 吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes:
+            wecom_config.remove_webhook(name)
+            self._load_webhooks()
+
+    # ══════════════════════════════════════════════════════
+    #  全局 QSS
+    # ══════════════════════════════════════════════════════
+
+    @staticmethod
+    def _stylesheet() -> str:
+        return f"""
+            /* ── window ── */
+            QDialog {{
+                background: {_TOOLBAR_BG};
+                font-family: {FONT_FAMILY};
+                font-size: 13px;
+            }}
+
+            /* ── toolbar / bottom bar ── */
+            QWidget#rc_toolbar {{
+                background: {_TOOLBAR_BG};
+            }}
+            QToolButton#rc_tab {{
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+                color: #666;
+                font-size: 11px;
+                padding: 4px 0;
+            }}
+            QToolButton#rc_tab:checked {{
+                background: {_TAB_CHECKED};
+                color: #222;
+                font-weight: 600;
+            }}
+            QToolButton#rc_tab:hover:!checked {{
+                background: {_TAB_HOVER};
+            }}
+
+            /* ── content pages ── */
+            QStackedWidget#rc_pages,
+            QWidget#rc_page_bg {{
+                background: {_CONTENT_BG};
+            }}
+            QScrollArea {{
+                background: {_CONTENT_BG};
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: {_CONTENT_BG};
+            }}
+
+            /* ── form controls ── */
+
+            /* QKeySequenceEdit: outer frame is invisible container */
+            QKeySequenceEdit {{
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }}
+            /* real border lives on the inner QLineEdit */
+            QKeySequenceEdit QLineEdit {{
+                background: {_CONTENT_BG};
+                border: 1px solid {BORDER_DEFAULT};
+                border-radius: {RADIUS_MD}px;
+                padding: 4px 10px;
+                font-size: 13px;
+                color: {TEXT_PRIMARY};
+            }}
+            QKeySequenceEdit QLineEdit:focus {{
+                border-color: {ACCENT_PRIMARY};
+            }}
+
+            QComboBox {{
+                background: {_CONTENT_BG};
+                border: 1px solid {BORDER_DEFAULT};
+                border-radius: {RADIUS_MD}px;
+                padding: 4px 10px;
+                font-size: 13px;
+                color: {TEXT_PRIMARY};
+                min-height: 24px;
+            }}
+            QComboBox:focus {{
+                border-color: {ACCENT_PRIMARY};
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 20px;
+                border: none;
+            }}
+
+            /* hotkey page: combo styled identically to QKeySequenceEdit inner QLineEdit */
+            QComboBox#hotkey_combo {{
+                min-height: 0px;
+            }}
+            QComboBox#hotkey_combo::drop-down {{
+                width: 0px;
+                border: none;
+            }}
+
+            /* ── prompt list (left panel) ── */
+            QListWidget#pm_list {{
+                background: transparent;
+                border: none;
+                outline: none;
+                font-size: 13px;
+                color: {TEXT_PRIMARY};
+            }}
+            QListWidget#pm_list::item {{
+                padding: 9px 10px;
+                border-radius: {RADIUS_SM}px;
+                margin: 1px 0;
+            }}
+            QListWidget#pm_list::item:selected {{
+                background: {ACCENT_SUBTLE};
+                color: {ACCENT_PRIMARY};
+                font-weight: 600;
+            }}
+            QListWidget#pm_list::item:hover:!selected {{
+                background: {BG_HOVER};
+            }}
+
+            /* ── misc ── */
+            QLabel {{
+                background: transparent;
+            }}
+
+            /* ── scrollbar ── */
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(0,0,0,0.15);
+                border-radius: 3px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(0,0,0,0.25);
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+        """

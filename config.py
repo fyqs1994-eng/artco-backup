@@ -61,25 +61,62 @@ AI_MODELS = {
         {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "provider": "anthropic"},
     ],
     "image_gen": [
-        {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
-        {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "provider": "google"},
+        {"id": "imagen-3.0-generate-001", "name": "Imagen 3.0", "provider": "google"},
+        {"id": "imagen-3.0-generate-001-fast", "name": "Imagen 3.0 (快速)", "provider": "google"},
+        {"id": "imagen-3.0-generate-001-ultra", "name": "Imagen 3.0 (超高清)", "provider": "google"},
     ]
+}
+
+# --- AI 服务商配置 ---
+AI_PROVIDERS = {
+    "google": {
+        "name": "Google Gemini",
+        "models": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro"],
+        "key_url": "https://aistudio.google.com/app/apikey",
+        "default_vision": "gemini-2.5-flash",
+        "default_image_gen": "imagen-3.0-generate-001",
+    },
+    "openai": {
+        "name": "OpenAI",
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+        "key_url": "https://platform.openai.com/api-keys",
+        "default_vision": "gpt-4o-mini",
+        "default_image_gen": "imagen-3.0-generate-001",  # OpenAI 图像生成使用 DALL-E，但暂不支持
+    },
+    "anthropic": {
+        "name": "Anthropic Claude",
+        "models": ["claude-3-5-sonnet-20241022"],
+        "key_url": "https://console.anthropic.com/settings/keys",
+        "default_vision": "claude-3-5-sonnet-20241022",
+        "default_image_gen": "imagen-3.0-generate-001",  # Claude 不支持图像生成
+    },
+    "seedream": {
+        "name": "Seedream",
+        "models": ["seedream-3-0"],
+        "key_url": "https://platform.seedream.io/",
+        "default_vision": "seedream-3-0",
+        "default_image_gen": "seedream-3-0",
+    }
 }
 
 # --- 默认配置 ---
 DEFAULT_AI_CONFIG = {
     "task_type": "vision",
     "vision_model": "gemini-2.5-flash",
-    "image_gen_model": "gemini-2.5-flash",
+    "image_gen_model": "imagen-3.0-generate-001",
+    "enabled_providers": ["google", "openai", "anthropic", "seedream"],
+    "current_provider": "google",
     "api_keys": {
         "google": "",
         "openai": "",
-        "anthropic": ""
+        "anthropic": "",
+        "seedream": ""
     },
     "api_base_urls": {
         "google": "",
         "openai": "",
-        "anthropic": ""
+        "anthropic": "",
+        "seedream": ""
     }
 }
 
@@ -160,9 +197,15 @@ class AIConfigManager:
         """获取当前选择的模型"""
         task_type = self._config.get("task_type", "vision")
         if task_type == "vision":
-            return self._config.get("vision_model", "gemini-2.5-flash")
+            model = self._config.get("vision_model")
+            return model if model else "gemini-2.5-flash"
         else:
-            return self._config.get("image_gen_model", "dall-e-3")
+            return self.get_image_gen_model()
+
+    def get_image_gen_model(self):
+        """获取图像生成模型"""
+        model = self._config.get("image_gen_model")
+        return model if model else "imagen-3.0-generate-001"
     
     def get_current_provider(self):
         """获取当前模型的提供商"""
@@ -173,6 +216,47 @@ class AIConfigManager:
             if model["id"] == model_id:
                 return model["provider"]
         return "google"
+
+    # ========== 服务商列表管理 ==========
+    def get_enabled_providers(self):
+        """获取已启用的服务商列表"""
+        return self._config.get("enabled_providers", [])
+
+    def set_enabled_providers(self, providers):
+        """设置已启用的服务商列表"""
+        self._config["enabled_providers"] = providers
+        self._save_config()
+
+    def get_current_provider_selected(self):
+        """获取当前选中的服务商"""
+        provider = self._config.get("current_provider")
+        return provider if provider else "google"
+
+    def set_current_provider_selected(self, provider):
+        """设置当前选中的服务商"""
+        self._config["current_provider"] = provider
+        self._save_config()
+
+    def add_provider(self, provider):
+        """添加服务商"""
+        providers = self.get_enabled_providers()
+        if provider not in providers:
+            providers.append(provider)
+            self.set_enabled_providers(providers)
+
+    def remove_provider(self, provider):
+        """移除服务商"""
+        providers = self.get_enabled_providers()
+        if provider in providers:
+            providers.remove(provider)
+            self.set_enabled_providers(providers)
+        # 如果删除的是当前选中的服务商，切换到第一个
+        if self.get_current_provider_selected() == provider:
+            remaining = self.get_enabled_providers()
+            if remaining:
+                self.set_current_provider_selected(remaining[0])
+            else:
+                self.set_current_provider_selected("")
 
 
 # 全局配置管理器实例
@@ -194,9 +278,6 @@ DEFAULT_WORKSPACE_CONFIG = {
     "last_topic": "",      # 上次使用的主题
     "last_resource_type": "KV",  # 上次使用的资源类型
     "last_progress": "粗草",     # 上次使用的进度
-    "vendor_company": "",  # 供应商公司名称（用于提交/协作分流）
-    "vendor_id": "",       # 供应商 UUID（关联 Supabase vendors 表）
-    "vendor_name": "",     # 供应商名称（缓存，避免重复查询）
 }
 
 
@@ -221,6 +302,7 @@ class WorkspaceConfigManager:
                 for key, value in DEFAULT_WORKSPACE_CONFIG.items():
                     if key not in self._config:
                         self._config[key] = value
+                self._config.pop("vendor_company", None)
             except Exception:
                 self._config = DEFAULT_WORKSPACE_CONFIG.copy()
         else:
@@ -248,43 +330,6 @@ class WorkspaceConfigManager:
         path = self.get_workspace_path()
         return bool(path) and os.path.isdir(path)
 
-    def get_vendor_company(self) -> str:
-        """获取供应商公司名称（用于提交/协作分流）"""
-        return (self._config.get("vendor_company") or "").strip()
-
-    def set_vendor_company(self, name: str):
-        """设置供应商公司名称"""
-        self._config["vendor_company"] = (name or "").strip()
-        self._save_config()
-    
-    def get_vendor_id(self) -> str:
-        """获取供应商 UUID"""
-        return self._config.get("vendor_id", "")
-    
-    def set_vendor_id(self, vendor_id: str):
-        """设置供应商 UUID"""
-        self._config["vendor_id"] = vendor_id or ""
-        self._save_config()
-    
-    def get_vendor_name(self) -> str:
-        """获取供应商名称"""
-        return self._config.get("vendor_name", "")
-    
-    def set_vendor_name(self, vendor_name: str):
-        """设置供应商名称"""
-        self._config["vendor_name"] = vendor_name or ""
-        self._save_config()
-    
-    def set_vendor(self, vendor_id: str, vendor_name: str):
-        """设置供应商身份（同时设置 ID 和名称）"""
-        self._config["vendor_id"] = vendor_id or ""
-        self._config["vendor_name"] = vendor_name or ""
-        self._save_config()
-    
-    def is_vendor_configured(self) -> bool:
-        """检查是否已配置供应商身份"""
-        return bool(self.get_vendor_id())
-    
     def get_recent_topics(self) -> list:
         """获取最近使用的主题列表"""
         return self._config.get("recent_topics", [])
@@ -431,11 +476,11 @@ def _find_ps_from_common_paths() -> str:
 class PhotoshopConfigManager:
     """Photoshop 路径配置管理器"""
     _instance = None
-    _config = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            cls._instance._config = None  # 确保实例变量被初始化
             cls._instance._load_config()
         return cls._instance
     
@@ -490,6 +535,25 @@ class PhotoshopConfigManager:
         """检查是否已配置有效的 PS 路径"""
         path = self.get_ps_path()
         return bool(path) and os.path.exists(path)
+
+    # 裁剪缩小功能设置
+    def get_crop_shrink_enabled(self) -> bool:
+        """获取裁剪缩小功能是否启用"""
+        return self._config.get("crop_shrink_enabled", False)
+
+    def set_crop_shrink_enabled(self, enabled: bool):
+        """设置裁剪缩小功能是否启用"""
+        self._config["crop_shrink_enabled"] = enabled
+        self._save_config()
+
+    def get_thumbnail_size(self) -> int:
+        """获取缩略图大小"""
+        return self._config.get("thumbnail_size", 64)
+
+    def set_thumbnail_size(self, size: int):
+        """设置缩略图大小"""
+        self._config["thumbnail_size"] = size
+        self._save_config()
 
 
 # 全局 Photoshop 配置管理器实例

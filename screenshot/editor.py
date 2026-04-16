@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, QSize, QPoint, QBuffer, QIODevice, QTimer, QRect
 from PySide6.QtGui import QColor, QPainter, QPixmap, QGuiApplication, QKeyEvent, QCursor, QFont, QFontMetrics
 
 from database import add_record
-from ui import PromptSelectMenu, PromptSettingsWindow
+from ui import PromptSelectMenu, SettingsDialog
 from .marks import FONT_NAME
 from .canvas import EditorCanvas
 from .marks import NumberDot
@@ -26,6 +26,10 @@ class EditorWindow(QMainWindow):
         super().__init__()
         self.pixmap = pixmap
         self._auto_fitted = False
+        self._copied = False  # 标记是否有过复制操作
+        self._annotation_panel_visible = False
+        self._annotation_expand_delta = 0
+        self._annotation_expanded_by_us = False
         self.init_ui()
 
     
@@ -118,6 +122,9 @@ class EditorWindow(QMainWindow):
         
         # 连接序号点变化信号
         self.canvas.number_dots_changed.connect(self._sync_annotation_panel)
+        # 连接序号点点击信号，聚焦到侧栏输入框
+        self.canvas.number_dot_clicked.connect(self.annotation_panel.focus_annotation)
+
         
         # Prompt 选择菜单
         self.prompt_menu = PromptSelectMenu(self)
@@ -137,6 +144,51 @@ class EditorWindow(QMainWindow):
         """同步序号注释面板"""
         number_dots = [m for m in self.canvas.marks if isinstance(m, NumberDot)]
         self.annotation_panel.sync_with_marks(number_dots)
+        panel_visible = self.annotation_panel.isVisible()
+        if panel_visible != self._annotation_panel_visible:
+            self._on_annotation_panel_visibility_changed(panel_visible)
+            self._annotation_panel_visible = panel_visible
+
+    def _on_annotation_panel_visibility_changed(self, visible: bool):
+        """注释侧栏显隐时，窗口向外扩展/收回，避免挤压图片可视区域。"""
+        panel_w = self.annotation_panel.width()
+        spacing = 0
+        central = self.centralWidget()
+        if central and central.layout():
+            spacing = central.layout().spacing()
+        delta = panel_w + max(0, spacing)
+        if delta <= 0:
+            return
+
+        geo = self.geometry()
+        screen = QGuiApplication.screenAt(geo.center())
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry()
+
+        if visible:
+            # 仅在我们有空间扩展时外扩；优先向右扩，越界则整体左移以保持完整可见
+            target_w = min(geo.width() + delta, avail.width())
+            applied_delta = target_w - geo.width()
+            if applied_delta <= 0:
+                self._annotation_expanded_by_us = False
+                self._annotation_expand_delta = 0
+                return
+            new_x = geo.x()
+            overflow = (new_x + target_w) - avail.right()
+            if overflow > 0:
+                new_x = max(avail.left(), new_x - overflow)
+            self.setGeometry(new_x, geo.y(), target_w, geo.height())
+            self._annotation_expanded_by_us = True
+            self._annotation_expand_delta = applied_delta
+        else:
+            # 只回收我们之前自动扩出来的宽度，避免覆盖用户手动调整
+            if not self._annotation_expanded_by_us or self._annotation_expand_delta <= 0:
+                return
+            target_w = max(self.minimumWidth(), geo.width() - self._annotation_expand_delta)
+            self.setGeometry(geo.x(), geo.y(), target_w, geo.height())
+            self._annotation_expanded_by_us = False
+            self._annotation_expand_delta = 0
     
     def _on_tool_changed(self, tool_id: int):
         self.canvas.set_tool(tool_id)
@@ -224,60 +276,64 @@ class EditorWindow(QMainWindow):
         return result
     
     def _render_final_image_with_annotations(self) -> QPixmap:
-        """渲染最终图片 + 序号注释栏（如果有注释）"""
-        # 先渲染基础图片
+        """渲染最终图片 + 序号注释栏（文字与附加图片）"""
         base_image = self._render_final_image()
         
-        # 获取注释内容
         annotations = self.annotation_panel.get_annotations()
+        images = self.annotation_panel.get_annotation_images()
         
-        # 如果没有序号点或注释为空，直接返回基础图片
-        if not annotations:
+        if not self.annotation_panel.has_annotations():
             return base_image
         
-        # 检查是否有实际内容的注释
-        has_content = any(text.strip() for text in annotations.values())
-        if not has_content:
+        all_numbers = sorted(set(annotations.keys()) | set(images.keys()))
+        if not all_numbers:
             return base_image
         
-        # 配置参数
         panel_width = 240
         padding = 16
         title_height = 40
         item_spacing = 12
         circle_size = 22
-        text_left_margin = 8  # 圆点和文字之间的间距
+        text_left_margin = 8
         
-        # 准备字体
         item_font = QFont(FONT_NAME, 12)
         item_fm = QFontMetrics(item_font)
-        line_height = item_fm.height()
         
-        # 计算每个注释项的实际高度（支持多行）
         text_width = panel_width - padding * 2 - circle_size - text_left_margin
-        item_heights = {}
+        item_text_heights: dict[int, int] = {}
+        item_total_heights: dict[int, int] = {}
+        item_scaled_images: dict[int, QPixmap] = {}
         
-        for number in sorted(annotations.keys()):
-            text = annotations[number].strip()
-            if not text:
-                text = " "  # 空文本也占一行
-            
-            # 计算文字需要多少行
+        for number in all_numbers:
+            raw = (annotations.get(number) or "").strip()
+            wrap_text = raw if raw else " "
             rect = item_fm.boundingRect(
                 0, 0, text_width, 10000,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
-                text
+                wrap_text
             )
-            text_height = rect.height()
-            # 取文字高度和圆点高度的较大值
-            item_heights[number] = max(circle_size, text_height)
+            text_block_h = max(circle_size, rect.height())
+            item_text_heights[number] = text_block_h
+            
+            pm = images.get(number)
+            img_extra = 0
+            if pm is not None and not pm.isNull():
+                scaled = pm.scaled(
+                    text_width, 200,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                item_scaled_images[number] = scaled
+                img_extra = scaled.height() + 8
+            else:
+                item_scaled_images[number] = QPixmap()
+            
+            item_total_heights[number] = text_block_h + img_extra
         
-        # 计算注释栏总高度
-        total_items_height = sum(item_heights.values()) + item_spacing * (len(item_heights) - 1)
+        total_items_height = sum(item_total_heights.values()) + item_spacing * (len(all_numbers) - 1)
         panel_content_height = title_height + padding + total_items_height + padding
         panel_height = max(base_image.height(), panel_content_height)
         
-        # 创建合成图片
         total_width = base_image.width() + panel_width
         result = QPixmap(total_width, panel_height)
         result.fill(QColor(255, 255, 255))
@@ -286,14 +342,11 @@ class EditorWindow(QMainWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         
-        # 绘制原图
         painter.drawPixmap(0, 0, base_image)
         
-        # 绘制注释栏背景
         panel_x = base_image.width()
         painter.fillRect(panel_x, 0, panel_width, panel_height, QColor(248, 249, 250))
         
-        # 绘制标题
         title_font = QFont(FONT_NAME, 13)
         title_font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(title_font)
@@ -301,26 +354,24 @@ class EditorWindow(QMainWindow):
         painter.drawText(panel_x + padding, padding, panel_width - padding * 2, 20,
                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "序号注释")
         
-        # 绘制分隔线
         separator_y = padding + 24
         painter.setPen(QColor(224, 224, 224))
         painter.drawLine(panel_x + padding, separator_y, panel_x + panel_width - padding, separator_y)
         
-        # 绘制注释项
         y_offset = title_height + padding
         
-        for number in sorted(annotations.keys()):
-            text = annotations[number].strip()
-            item_height = item_heights[number]
+        for number in all_numbers:
+            text_block_h = item_text_heights[number]
+            total_h = item_total_heights[number]
+            raw = (annotations.get(number) or "").strip()
+            draw_text = raw if raw else " "
             
-            # 绘制序号圆点（顶部对齐）
             circle_x = panel_x + padding
             circle_y = y_offset
             painter.setBrush(QColor(255, 50, 50))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(circle_x, circle_y, circle_size, circle_size)
             
-            # 绘制序号数字
             painter.setPen(QColor(255, 255, 255))
             number_font = QFont(FONT_NAME, 10)
             number_font.setWeight(QFont.Weight.Bold)
@@ -328,16 +379,19 @@ class EditorWindow(QMainWindow):
             painter.drawText(circle_x, circle_y, circle_size, circle_size,
                            Qt.AlignmentFlag.AlignCenter, str(number))
             
-            # 绘制注释文字（支持多行自动换行）
             painter.setPen(QColor(51, 51, 51))
             painter.setFont(item_font)
             text_x = circle_x + circle_size + text_left_margin
-            text_rect = QRect(text_x, y_offset, text_width, item_height)
+            text_rect = QRect(text_x, y_offset, text_width, text_block_h)
             painter.drawText(text_rect,
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
-                           text)
+                           draw_text)
             
-            y_offset += item_height + item_spacing
+            scaled = item_scaled_images.get(number)
+            if scaled is not None and not scaled.isNull():
+                painter.drawPixmap(text_x, y_offset + text_block_h, scaled)
+            
+            y_offset += total_h + item_spacing
         
         painter.end()
         return result
@@ -353,8 +407,18 @@ class EditorWindow(QMainWindow):
     def _copy_image(self):
         final_pixmap = self._render_final_image_with_annotations()
         QGuiApplication.clipboard().setPixmap(final_pixmap)
+        self._copied = True  # 标记已复制
         self.setWindowTitle("Artco 编辑器 - 已复制到剪贴板！")
-        QTimer.singleShot(2000, lambda: self.setWindowTitle("Artco 编辑器"))
+        # 使用 weakref 避免窗口已删除后回调报错
+        self._title_timer = QTimer()
+        self._title_timer.setSingleShot(True)
+        self._title_timer.timeout.connect(self._restore_title)
+        self._title_timer.start(2000)
+    
+    def _restore_title(self):
+        """恢复窗口标题（定时器回调）"""
+        if self.isVisible():
+            self.setWindowTitle("Artco 编辑器")
     
     def _ai_analyze(self):
         btn = self.toolbar.findChild(QPushButton, "action_btn")
@@ -365,7 +429,8 @@ class EditorWindow(QMainWindow):
         self.prompt_menu.exec(pos)
     
     def _open_prompt_editor(self):
-        self.prompt_settings_window = PromptSettingsWindow(stay_on_top=True)
+        self.prompt_settings_window = SettingsDialog(self)
+        self.prompt_settings_window.show_tab('prompt')
         self.prompt_settings_window.show()
     
     def _do_ai_analyze(self, prompt: str = None, prompt_type: str = "text"):
@@ -441,7 +506,8 @@ class EditorWindow(QMainWindow):
         self.close()
     
     def closeEvent(self, event):
-        if self.canvas.marks:
+        # 如果已经复制到剪贴板，或者没有标注，则不弹出确认
+        if self.canvas.marks and not getattr(self, '_copied', False):
             reply = QMessageBox.question(
                 self, "确认退出",
                 "您的标注尚未保存，确定要退出吗？",
@@ -451,8 +517,10 @@ class EditorWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Cancel:
                 event.ignore()
                 return
-        # 关闭颜色气泡
-        if self.toolbar._color_bubble:
+        # 停止标题恢复定时器
+        if hasattr(self, '_title_timer') and self._title_timer.isActive():
+            self._title_timer.stop()
+        if hasattr(self.toolbar, '_color_bubble') and self.toolbar._color_bubble:
             self.toolbar._color_bubble.hide()
             self.toolbar._color_bubble.deleteLater()
             self.toolbar._color_bubble = None
@@ -464,5 +532,9 @@ class EditorWindow(QMainWindow):
             return
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.canvas.delete_selected()
+            return
+        # Ctrl+Z 撤销
+        if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.canvas.undo()
             return
         super().keyPressEvent(event)

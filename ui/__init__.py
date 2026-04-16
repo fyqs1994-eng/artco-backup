@@ -10,7 +10,6 @@ UI 组件模块 - 解耦后的统一导出
 - ai_result.py      : AI 结果展示组件
 - image_viewer.py   : 图片浏览器（独立入口 viewer_main.py 使用）
 - assign_panel.py   : 分配面板
-- task_panel.py     : 任务面板（Supabase 联动）
 """
 
 from .ai_worker import AIWorker
@@ -20,7 +19,6 @@ from .archive import ArchiveDetailDialog, ArchiveCard, ArchiveGalleryPanel, Clip
 from .workbench import WorkbenchWindow
 from .ai_result import AIResultBubble, AIResultPanel, AIImageResultWindow
 from .assign_panel import AssignPanel
-from .task_panel import TaskPanel
 from .clipboard_float import ClipboardFloatPanel
 
 __all__ = [
@@ -50,9 +48,6 @@ __all__ = [
     
     # 分配面板
     'AssignPanel',
-    
-    # 任务面板
-    'TaskPanel',
     
     # 剪贴板悬浮面板
     'ClipboardFloatPanel',

@@ -71,7 +71,7 @@ class ClipboardFloatCard(QFrame):
             
             layout.addWidget(thumb_label)
         else:
-            # 文本预览
+            # 文本 / 文件（文件只显示文件名或「N 个文件」，不占满整格路径）
             text_label = QLabel()
             text_label.setFixedSize(88, 88)
             text_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -140,106 +140,122 @@ class ClipboardFloatCard(QFrame):
     
     def _start_drag(self):
         """启动拖拽操作"""
-        print(f"[DEBUG] 开始拖拽操作，类型: {self.item.content_type}")
         drag = QDrag(self)
         mime_data = QMimeData()
-        
-        if self.item.content_type == "image":
-            pixmap = self.item.content
-            if pixmap and not pixmap.isNull():
-                width, height = pixmap.width(), pixmap.height()
-                print(f"[DEBUG] 拖拽图片: {width}x{height}")
-                
-                # 1. 总是设置图片数据（Qt标准格式）
-                mime_data.setImageData(pixmap.toImage())
-                
-                # 2. 显式设置 MIME 类型数据（浏览器需要特定的 image/png 或 image/jpeg 格式）
-                # 将图片转换为 bytes 并设置对应的 MIME 类型
-                from PySide6.QtCore import QBuffer, QIODevice
-                
-                # 选择格式：有透明通道用 PNG，否则用 JPEG
-                has_alpha = pixmap.hasAlphaChannel()
-                format = "PNG" if has_alpha else "JPEG"
-                mime_type = "image/png" if has_alpha else "image/jpeg"
-                
-                # 将 pixmap 转换为 bytes
-                buffer = QBuffer()
-                buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-                quality = 85  # JPEG 质量
-                success = pixmap.save(buffer, format, quality if format == "JPEG" else -1)
-                
-                if success:
-                    image_data = buffer.data().data()
-                    mime_data.setData(mime_type, image_data)
-                    print(f"[DEBUG] 设置 MIME 数据: {mime_type}, 大小: {len(image_data)} 字节")
-                    
-                    # 3. 总是生成临时文件（浏览器上传需要文件路径）
-                    # 检查图片大小，大图可能优化
-                    estimated_size = width * height * 4
-                    max_size_for_temp = 20 * 1024 * 1024  # 20MB 阈值，提高以避免卡顿
-                    
-                    if estimated_size < max_size_for_temp:
-                        # 正常保存
-                        temp_path = self._save_temp_image(pixmap)
-                    else:
-                        # 大图：调整大小再保存（避免卡顿）
-                        print(f"[DEBUG] 图片较大 ({estimated_size//1024//1024}MB)，优化处理")
-                        # 保持宽高比，最大尺寸 2000px
-                        max_dimension = 2000
-                        if max(width, height) > max_dimension:
-                            ratio = max_dimension / max(width, height)
-                            new_width = int(width * ratio)
-                            new_height = int(height * ratio)
-                            optimized = pixmap.scaled(
-                                new_width, new_height,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation
-                            )
-                            temp_path = self._save_temp_image(optimized)
-                            print(f"[DEBUG] 图片优化为: {new_width}x{new_height}")
-                        else:
-                            temp_path = self._save_temp_image(pixmap)
-                    
-                    if temp_path:
-                        # 设置文件 URL（标准方式）
-                        file_url = QUrl.fromLocalFile(temp_path)
-                        mime_data.setUrls([file_url])
-                        
-                        # 显式设置 text/uri-list 格式（某些浏览器需要）
-                        # text/uri-list 应该是换行符分隔的 URL 列表
-                        uri_list = file_url.toString()
-                        mime_data.setData("text/uri-list", uri_list.encode('utf-8'))
-                        
-                        # 设置浏览器特定的 MIME 类型
-                        mime_data.setData("application/x-moz-file", temp_path.encode('utf-8'))
-                        
-                        # 设置通用文件类型
-                        mime_data.setData("application/octet-stream", image_data)
-                        
-                        print(f"[DEBUG] 设置文件 URL: {temp_path}, URI: {uri_list}")
-                
-                # 设置拖拽预览（缩放小图，避免卡顿）
-                preview_size = min(80, pixmap.width(), pixmap.height())
-                scaled = pixmap.scaled(
-                    preview_size, preview_size,
+        source_path = self.item.source_file_path if self.item.content_type == "image" else None
+        if source_path and os.path.isfile(source_path):
+            # 文件来源图片：拖拽优先传源文件 URL，避免二次编码导致质量损失
+            file_url = QUrl.fromLocalFile(source_path)
+            mime_data.setUrls([file_url])
+            mime_data.setData("text/uri-list", file_url.toString().encode("utf-8"))
+            drag.setMimeData(mime_data)
+            preview = self.item.try_get_pixmap()
+            if preview is not None and not preview.isNull():
+                ps = min(80, preview.width(), preview.height())
+                scaled = preview.scaled(
+                    ps, ps,
                     Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation  # 快速缩放
+                    Qt.TransformationMode.FastTransformation
                 )
                 drag.setPixmap(scaled)
                 drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
+            result = drag.exec(Qt.DropAction.CopyAction)
+            return
+        
+        pixmap = None
+        if self.item.content_type == "image":
+            p = self.item.content
+            pixmap = p if p and not p.isNull() else None
+        else:
+            pixmap = self.item.try_get_pixmap()
+        
+        if pixmap is not None and not pixmap.isNull():
+            width, height = pixmap.width(), pixmap.height()
+            
+            # 1. 总是设置图片数据（Qt标准格式）
+            mime_data.setImageData(pixmap.toImage())
+            
+            # 2. 显式设置 MIME 类型数据（浏览器需要特定的 image/png 或 image/jpeg 格式）
+            # 将图片转换为 bytes 并设置对应的 MIME 类型
+            from PySide6.QtCore import QBuffer, QIODevice
+            
+            # 选择格式：有透明通道用 PNG，否则用 JPEG
+            has_alpha = pixmap.hasAlphaChannel()
+            format = "PNG" if has_alpha else "JPEG"
+            mime_type = "image/png" if has_alpha else "image/jpeg"
+            
+            # 将 pixmap 转换为 bytes
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            quality = 85  # JPEG 质量
+            success = pixmap.save(buffer, format, quality if format == "JPEG" else -1)
+            
+            if success:
+                image_data = buffer.data().data()
+                mime_data.setData(mime_type, image_data)
                 
-                # 输出调试信息
-                print(f"[DEBUG] MIME 格式: {mime_data.formats()}")
+                # 3. 总是生成临时文件（浏览器上传需要文件路径）
+                # 检查图片大小，大图可能优化
+                estimated_size = width * height * 4
+                max_size_for_temp = 20 * 1024 * 1024  # 20MB 阈值，提高以避免卡顿
+                
+                if estimated_size < max_size_for_temp:
+                    # 正常保存
+                    temp_path = self._save_temp_image(pixmap)
+                else:
+                    # 大图：调整大小再保存（避免卡顿）
+                    # 保持宽高比，最大尺寸 2000px
+                    max_dimension = 2000
+                    if max(width, height) > max_dimension:
+                        ratio = max_dimension / max(width, height)
+                        new_width = int(width * ratio)
+                        new_height = int(height * ratio)
+                        optimized = pixmap.scaled(
+                            new_width, new_height,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        temp_path = self._save_temp_image(optimized)
+                    else:
+                        temp_path = self._save_temp_image(pixmap)
+                
+                if temp_path:
+                    # 设置文件 URL（标准方式）
+                    file_url = QUrl.fromLocalFile(temp_path)
+                    mime_data.setUrls([file_url])
+                    
+                    # 显式设置 text/uri-list 格式（某些浏览器需要）
+                    # text/uri-list 应该是换行符分隔的 URL 列表
+                    uri_list = file_url.toString()
+                    mime_data.setData("text/uri-list", uri_list.encode('utf-8'))
+                    
+                    # 设置浏览器特定的 MIME 类型
+                    mime_data.setData("application/x-moz-file", temp_path.encode('utf-8'))
+                    
+                    # 设置通用文件类型
+                    mime_data.setData("application/octet-stream", image_data)
+            
+            # 设置拖拽预览（缩放小图，避免卡顿）
+            preview_size = min(80, pixmap.width(), pixmap.height())
+            scaled = pixmap.scaled(
+                preview_size, preview_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation  # 快速缩放
+            )
+            drag.setPixmap(scaled)
+            drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
+            
+        elif self.item.content_type == "file":
+            paths = self.item.file_paths()
+            if paths:
+                mime_data.setUrls([QUrl.fromLocalFile(p) for p in paths])
         else:
             text = self.item.content
             if text:
                 mime_data.setText(text)
-                print(f"[DEBUG] 拖拽文本: {text[:50]}...")
         
         drag.setMimeData(mime_data)
-        print(f"[DEBUG] 执行拖拽操作")
-        result = drag.exec(Qt.DropAction.CopyAction)
-        print(f"[DEBUG] 拖拽完成，结果: {result}")
+        drag.exec(Qt.DropAction.CopyAction)
         # 拖拽完成后延迟清理临时文件（给浏览器时间读取文件）
         # 延迟 5 秒清理，避免浏览器异步读取时文件已被删除
         self.cleanup(delay_ms=5000)
@@ -262,10 +278,9 @@ class ClipboardFloatCard(QFrame):
             quality = 85  # JPEG 质量
             if pixmap.save(temp_path, format, quality if format == "JPEG" else -1):
                 self._temp_file_path = temp_path
-                print(f"[DEBUG] 生成临时文件: {temp_path} ({format}, {pixmap.width()}x{pixmap.height()})")
                 return temp_path
-        except Exception as e:
-            print(f"[DEBUG] 保存临时文件失败: {e}")
+        except Exception:
+            pass
         return None
     
     def cleanup(self, delay_ms: int = 0):
@@ -274,9 +289,7 @@ class ClipboardFloatCard(QFrame):
         Args:
             delay_ms: 延迟毫秒数，0表示立即清理
         """
-        print(f"[DEBUG] cleanup 调用，delay_ms={delay_ms}, _temp_file_path={self._temp_file_path}")
         if not self._temp_file_path:
-            print(f"[DEBUG] cleanup 跳过：无临时文件路径")
             return
             
         temp_path = self._temp_file_path
@@ -286,17 +299,12 @@ class ClipboardFloatCard(QFrame):
             if os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
-                    print(f"[DEBUG] 清理临时文件: {temp_path}")
-                except Exception as e:
-                    print(f"[DEBUG] 清理临时文件失败: {temp_path}, 错误: {e}")
-            else:
-                print(f"[DEBUG] 临时文件已不存在: {temp_path}")
+                except Exception:
+                    pass
         
         if delay_ms <= 0:
-            print(f"[DEBUG] cleanup 立即执行")
             remove_file()
         else:
-            print(f"[DEBUG] cleanup 延迟 {delay_ms}ms 执行")
             QTimer.singleShot(delay_ms, remove_file)
 
 
@@ -500,59 +508,47 @@ class ClipboardFloatPanel(QWidget):
     
     def _on_card_clicked(self, item: ClipboardItem):
         """卡片点击 -> 粘贴到当前窗口"""
-        print(f"[DEBUG] 卡片点击，类型: {item.content_type}")
         # 设置剪贴板内容
         clipboard = QApplication.clipboard()
-        if item.content_type == "image":
-            print(f"[DEBUG] 设置剪贴板图片: {item.content.width()}x{item.content.height()}")
-            # 主要方法：设置 Pixmap
-            clipboard.setPixmap(item.content)
-            
-            # 备用方法：设置 Image（增强兼容性）
-            try:
-                clipboard.setImage(item.content.toImage())
-                print(f"[DEBUG] 已设置剪贴板 Image 数据")
-            except Exception as e:
-                print(f"[DEBUG] 设置剪贴板 Image 数据失败: {e}")
-            
-            # 检查剪贴板支持的格式
-            try:
-                mime_data = clipboard.mimeData()
-                if mime_data:
-                    formats = mime_data.formats()
-                    print(f"[DEBUG] 剪贴板 MIME 格式: {formats}")
-            except Exception as e:
-                print(f"[DEBUG] 检查剪贴板格式失败: {e}")
+        source_path = item.source_file_path if item.content_type == "image" else None
+        if source_path and os.path.isfile(source_path):
+            m = QMimeData()
+            file_url = QUrl.fromLocalFile(source_path)
+            m.setUrls([file_url])
+            m.setData("text/uri-list", file_url.toString().encode("utf-8"))
+            clipboard.setMimeData(m)
+            pm = item.try_get_pixmap()
         else:
-            print(f"[DEBUG] 设置剪贴板文本: {item.content[:100]}...")
+            pm = None
+            if item.content_type == "image":
+                p = item.content
+                pm = p if p and not p.isNull() else None
+        
+        if (source_path and os.path.isfile(source_path)) is False and pm is not None and not pm.isNull():
+            clipboard.setPixmap(pm)
+            try:
+                clipboard.setImage(pm.toImage())
+            except Exception:
+                pass
+        elif item.content_type == "file":
+            paths = item.file_paths()
+            if paths:
+                m = QMimeData()
+                m.setUrls([QUrl.fromLocalFile(p) for p in paths])
+                clipboard.setMimeData(m)
+        else:
             clipboard.setText(item.content)
         
-        # 验证剪贴板内容
-        if item.content_type == "image":
-            has_image = not clipboard.pixmap().isNull()
-            print(f"[DEBUG] 剪贴板验证 - 图片设置: {'成功' if has_image else '失败'}")
-            
-            # 尝试获取剪贴板中的图像
-            try:
-                image = clipboard.image()
-                has_image_alt = not image.isNull()
-                print(f"[DEBUG] 剪贴板验证 - Image 数据: {'存在' if has_image_alt else '不存在'}")
-            except Exception as e:
-                print(f"[DEBUG] 检查剪贴板 Image 失败: {e}")
-        
         # 关闭面板
-        print(f"[DEBUG] 关闭悬浮面板")
         self.hide()
         
         # 延迟后模拟粘贴（增加延迟确保窗口切换完成）
         # 企业微信可能需要更长时间才能获得焦点
         delay_ms = 400  # 从200增加到400毫秒
-        print(f"[DEBUG] 设置粘贴延迟: {delay_ms}ms")
         QTimer.singleShot(delay_ms, self._simulate_paste)
     
     def _simulate_paste(self):
         """模拟 Ctrl+V 粘贴"""
-        print(f"[DEBUG] 开始模拟 Ctrl+V 粘贴")
         try:
             import ctypes
             from ctypes import wintypes
@@ -632,29 +628,21 @@ class ClipboardFloatPanel(QWidget):
             inputs[3].union.ki.wVk = VK_CONTROL
             inputs[3].union.ki.dwFlags = KEYEVENTF_KEYUP
             
-            # 发送按键
-            print(f"[DEBUG] 发送 Ctrl+V 按键事件")
             result = SendInput(4, ctypes.cast(inputs, LPINPUT), ctypes.sizeof(INPUT))
-            print(f"[DEBUG] SendInput 返回值: {result} (成功: {result == 4})")
             
             if result != 4:
                 # 如果 SendInput 失败，尝试备用方法
-                print(f"[DEBUG] SendInput 失败，尝试备用键盘事件方法")
                 self._fallback_simulate_paste()
-            else:
-                print(f"[DEBUG] Ctrl+V 模拟成功")
                 
-        except Exception as e:
-            print(f"[DEBUG] 模拟粘贴失败: {e}")
+        except Exception:
             # 尝试备用方法
             try:
                 self._fallback_simulate_paste()
-            except Exception as e2:
-                print(f"[DEBUG] 备用方法也失败: {e2}")
+            except Exception:
+                pass
     
     def _fallback_simulate_paste(self):
         """备用粘贴方法（使用 keybd_event）"""
-        print(f"[DEBUG] 使用备用粘贴方法")
         try:
             import ctypes
             import time
@@ -678,9 +666,8 @@ class ClipboardFloatPanel(QWidget):
             # 释放 Ctrl
             ctypes.windll.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
             
-            print(f"[DEBUG] 备用粘贴方法执行完成")
-        except Exception as e:
-            print(f"[DEBUG] 备用粘贴方法失败: {e}")
+        except Exception:
+            pass
     
     def _clear_keyboard_state(self):
         """清除残留的按键状态"""

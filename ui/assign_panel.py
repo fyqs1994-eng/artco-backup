@@ -204,13 +204,6 @@ class AssignPanel(QDialog):
         self.btn_assign.clicked.connect(self._do_assign)
         btn_layout.addWidget(self.btn_assign)
         
-        self.btn_submit = PrimaryPushButton("分配并提交云端")
-
-        self.btn_submit.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_submit.setToolTip("分配文件并提交记录到 Supabase")
-        self.btn_submit.clicked.connect(self._do_assign_and_submit)
-        btn_layout.addWidget(self.btn_submit)
-        
         layout.addLayout(btn_layout)
 
     
@@ -427,91 +420,3 @@ class AssignPanel(QDialog):
             self.parent(), "分配成功",
             f"文件已分配到：\n{target}"
         )
-    
-    def _do_assign_and_submit(self):
-        """执行分配并提交到 Supabase"""
-        settings = self._get_current_settings()
-        workspace = workspace_config.get_workspace_path()
-        
-        # 验证
-        if not workspace:
-            QMessageBox.warning(self, "错误", "请先设置工作区目录")
-            return
-        
-        if not settings["topic"]:
-            QMessageBox.warning(self, "错误", "请输入主题名称")
-            return
-        
-        if not self._source_path.exists():
-            QMessageBox.warning(self, "错误", "源文件不存在")
-            return
-        
-        # 生成目标路径
-        target = self._generate_target_path(settings)
-        
-        # 检查目标是否已存在
-        if target.exists():
-            reply = QMessageBox.question(
-                self, "文件已存在",
-                f"目标文件已存在：\n{target.name}\n\n是否覆盖？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-        
-        # 创建目录
-        target.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 复制文件
-        try:
-            shutil.copy2(str(self._source_path), str(target))
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"复制文件失败：\n{e}")
-            return
-        
-        # 保存设置
-        workspace_config.save_last_settings(
-            settings["topic"],
-            settings["resource_type"],
-            settings["progress"]
-        )
-        
-        # 提交到 Supabase
-        try:
-            from supabase_client import submit_image_assignment
-            
-            file_size = target.stat().st_size if target.exists() else 0
-            result = submit_image_assignment(
-                topic=settings["topic"],
-                resource_type=settings["resource_type"],
-                progress=settings["progress"],
-                version=settings["version"],
-                filename=self._generate_filename(settings),
-                file_path=str(target),
-                workspace_path=workspace,
-                file_size=file_size
-            )
-            
-            if result["success"]:
-                self.assigned.emit(str(target))
-                self.accept()
-                QMessageBox.information(
-                    self.parent(), "分配并提交成功",
-                    f"文件已分配到：\n{target}\n\n记录已提交到云端"
-                )
-            else:
-                # 文件已复制，但提交失败
-                self.assigned.emit(str(target))
-                self.accept()
-                QMessageBox.warning(
-                    self.parent(), "部分成功",
-                    f"文件已分配到：\n{target}\n\n但云端提交失败：{result['message']}"
-                )
-        except ImportError:
-            self.assigned.emit(str(target))
-            self.accept()
-            QMessageBox.warning(
-                self.parent(), "部分成功",
-                f"文件已分配到：\n{target}\n\n但 Supabase 未安装，请运行：\npip install supabase"
-            )

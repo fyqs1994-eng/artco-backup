@@ -21,15 +21,16 @@ from PySide6.QtCore import (
     QBuffer, QIODevice
 )
 
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap
 
 
 from config import ai_config, get_bundle_dir
+from ui.theme import MENU_STYLE
 
 from database import init_database, add_record
 from utils import hotkey_manager, convert_hotkey_format
 from ui import (
-    AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, PromptSettingsWindow, WorkbenchWindow,
+    AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, WorkbenchWindow,
     ClipboardHistoryManager, ClipboardFloatPanel
 )
 from screenshot import ScreenshotOverlay, ScreenSelector, PinWindow
@@ -486,12 +487,20 @@ class CapsuleWidget(QWidget):
         self._conversation_image = None
     
     def _on_followup_requested(self, text: str):
-        """处理追问请求 - 根据原始任务类型选择不同路径"""
-        
-        if self._original_task_type == "image_gen":
+        """处理追问请求 - 根据当前使用的模型类型选择不同路径"""
+
+        # 根据当前配置的模型来判断任务类型（而不是依赖 task_type 配置）
+        vision_model = ai_config.get("vision_model")
+        image_gen_model = ai_config.get("image_gen_model")
+
+        # 判断当前使用的模型类型
+        current_model = ai_config.get_current_model()
+        is_using_image_gen_model = (current_model == image_gen_model)
+
+        if is_using_image_gen_model:
             # ── 图片生成追问：用新 prompt + 原图重新生成 ──
             ai_config.set("task_type", "image_gen")
-            
+
             self._followup_worker = AIWorker(
                 self._conversation_image,
                 prompt=text
@@ -501,20 +510,12 @@ class CapsuleWidget(QWidget):
             self._followup_worker.error.connect(self._on_followup_error)
             self._followup_worker.start()
         else:
-            # ── 视觉分析追问：多轮对话 ──
-            self._conversation_history.append({
-                "role": "user",
-                "content": text
-            })
-            
-            # 限制对话历史长度（保留首条带图消息 + 最近 18 轮）
-            max_messages = 19
-            if len(self._conversation_history) > max_messages:
-                self._conversation_history = [self._conversation_history[0]] + self._conversation_history[-(max_messages - 1):]
-            
+            # ── 视觉分析追问：用新 prompt + 原图重新分析 ──
+            ai_config.set("task_type", "vision")
+
             self._followup_worker = AIWorker(
                 self._conversation_image,
-                messages=self._conversation_history
+                prompt=text
             )
             self._followup_worker.finished.connect(self._on_followup_finished)
             self._followup_worker.error.connect(self._on_followup_error)
@@ -604,7 +605,28 @@ class CapsuleWidget(QWidget):
                     ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
                 ]
             
-            HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes.POINTER(KBDLLHOOKSTRUCT))
+            # SetWindowsHookExW expects stdcall callback (WinFunctionType), not cdecl.
+            HOOKPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_int,
+                wintypes.WPARAM,
+                ctypes.POINTER(KBDLLHOOKSTRUCT),
+            )
+
+            user32.SetWindowsHookExW.argtypes = [
+                ctypes.c_int,
+                HOOKPROC,
+                wintypes.HINSTANCE,
+                wintypes.DWORD,
+            ]
+            user32.SetWindowsHookExW.restype = wintypes.HHOOK
+            user32.CallNextHookEx.argtypes = [
+                wintypes.HHOOK,
+                ctypes.c_int,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.CallNextHookEx.restype = wintypes.LPARAM
             
             def keyboard_hook_proc(nCode, wParam, lParam):
                 if nCode >= 0:
@@ -623,9 +645,8 @@ class CapsuleWidget(QWidget):
                     elif wParam in (WM_KEYUP, WM_SYSKEYUP):
                         self._pressed_keys.discard(vk)
                 
-                # 将 lParam 指针转换为整数值
-                lParam_int = ctypes.cast(lParam, ctypes.c_void_p).value or 0
-                return user32.CallNextHookEx(None, nCode, wParam, lParam_int)
+                lparam_val = ctypes.cast(lParam, ctypes.c_void_p).value or 0
+                return user32.CallNextHookEx(None, nCode, wParam, wintypes.LPARAM(lparam_val))
             
             # 保持回调函数引用，防止被垃圾回收
             self._hook_proc = HOOKPROC(keyboard_hook_proc)
@@ -648,8 +669,7 @@ class CapsuleWidget(QWidget):
             self._hook_thread = threading.Thread(target=run_hook, daemon=True)
             self._hook_thread.start()
             
-        except Exception as e:
-            print(f"[DEBUG] Windows键盘钩子安装失败，回退到pynput方式: {e}")
+        except Exception:
             # 回退到 pynput 方式
             self._setup_fallback_hotkey()
     
@@ -698,6 +718,23 @@ class CapsuleWidget(QWidget):
             except:
                 pass
             self._hotkey_hook = None
+
+    def _unhook_clipboard_mouse_hook(self):
+        """卸载剪贴板浮窗鼠标钩子"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            if hasattr(self, '_clipboard_mouse_hook') and self._clipboard_mouse_hook:
+                ctypes.windll.user32.UnhookWindowsHookEx(self._clipboard_mouse_hook)
+                self._clipboard_mouse_hook = None
+            if hasattr(self, '_clipboard_mouse_thread_id') and self._clipboard_mouse_thread_id:
+                WM_QUIT = 0x0012
+                ctypes.windll.user32.PostThreadMessageW(
+                    wintypes.DWORD(self._clipboard_mouse_thread_id), WM_QUIT, 0, 0
+                )
+                self._clipboard_mouse_thread_id = 0
+        except Exception:
+            pass
     
     def _setup_fallback_hotkey(self):
         """回退到 pynput 方式（不阻止按键传递）"""
@@ -706,26 +743,21 @@ class CapsuleWidget(QWidget):
             
             hotkey_str = hotkey_manager.get('screenshot')
             if not hotkey_str:
-                print(f"[DEBUG] 截图热键未配置")
                 return
             
             hotkey_pynput = convert_hotkey_format(hotkey_str)
             if not hotkey_pynput:
-                print(f"[DEBUG] 无法转换热键格式: {hotkey_str}")
                 return
             
             def on_activate():
-                print(f"[DEBUG] 截图热键触发: {hotkey_str}")
                 self.hotkey_triggered.emit()
             
-            print(f"[DEBUG] 注册截图热键监听器: {hotkey_str} -> {hotkey_pynput}")
             self.hotkey_listener = keyboard.GlobalHotKeys({
                 hotkey_pynput: on_activate
             })
             self.hotkey_listener.start()
-            print(f"[DEBUG] 截图热键监听器已启动")
-        except Exception as e:
-            print(f"[DEBUG] 截图热键监听器启动失败: {e}")
+        except Exception:
+            pass
     
     def _setup_clipboard_float_hotkey(self):
         """注册剪贴板悬浮面板快捷键（鼠标侧键）"""
@@ -736,6 +768,9 @@ class CapsuleWidget(QWidget):
                 self._mouse_listener = None
         except Exception:
             pass
+
+        # 停止旧的底层鼠标钩子
+        self._unhook_clipboard_mouse_hook()
         
         try:
             if hasattr(self, '_clipboard_float_listener') and self._clipboard_float_listener:
@@ -745,22 +780,14 @@ class CapsuleWidget(QWidget):
             pass
         
         try:
-            from pynput import mouse
-            
             hotkey_str = hotkey_manager.get('clipboard_float')
-            print(f"[DEBUG] clipboard_float hotkey: {hotkey_str}")
             
             if not hotkey_str:
-                print("[DEBUG] No hotkey configured for clipboard_float")
                 return
             
-            # 解析鼠标按钮
-            button = None
-            if hotkey_str.lower() == 'mousex1':
-                button = mouse.Button.x1
-            elif hotkey_str.lower() == 'mousex2':
-                button = mouse.Button.x2
-            else:
+            # 非鼠标侧键：走键盘监听
+            hk_lower = hotkey_str.lower()
+            if hk_lower not in ('mousex1', 'mousex2'):
                 # 不是鼠标按钮，尝试使用键盘热键
                 from pynput import keyboard
                 hotkey_pynput = convert_hotkey_format(hotkey_str)
@@ -773,18 +800,84 @@ class CapsuleWidget(QWidget):
                     })
                     self._clipboard_float_listener.start()
                 return
-            
-            print(f"[DEBUG] Setting up mouse listener for button: {button}")
-            
-            def on_click(x, y, btn, pressed):
-                if btn == button and pressed:
-                    print(f"[DEBUG] Mouse button {button} pressed, emitting signal")
-                    self.clipboard_float_requested.emit()
-            
-            self._mouse_listener = mouse.Listener(on_click=on_click)
-            self._mouse_listener.start()
-        except Exception as e:
-            print(f"[DEBUG] _setup_clipboard_float_hotkey error: {e}")
+
+            # 鼠标侧键：使用底层钩子拦截并吞掉，避免触发浏览器后退/前进
+            import ctypes
+            from ctypes import wintypes
+            import threading
+
+            user32 = ctypes.windll.user32
+            WH_MOUSE_LL = 14
+            WM_XBUTTONDOWN = 0x020B
+            WM_XBUTTONUP = 0x020C
+            XBUTTON1 = 0x0001
+            XBUTTON2 = 0x0002
+            target_xbutton = XBUTTON1 if hk_lower == 'mousex1' else XBUTTON2
+
+            class MSLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("pt_x", ctypes.c_long),
+                    ("pt_y", ctypes.c_long),
+                    ("mouseData", wintypes.DWORD),
+                    ("flags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))
+                ]
+
+            MOUSEHOOKPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_long,
+                ctypes.c_int,
+                wintypes.WPARAM,
+                ctypes.POINTER(MSLLHOOKSTRUCT),
+            )
+
+            user32.SetWindowsHookExW.argtypes = [
+                ctypes.c_int,
+                MOUSEHOOKPROC,
+                wintypes.HINSTANCE,
+                wintypes.DWORD,
+            ]
+            user32.SetWindowsHookExW.restype = wintypes.HHOOK
+            user32.CallNextHookEx.argtypes = [
+                wintypes.HHOOK,
+                ctypes.c_int,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.CallNextHookEx.restype = wintypes.LPARAM
+
+            def mouse_hook_proc(nCode, wParam, lParam):
+                if nCode >= 0 and wParam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+                    md = int(lParam.contents.mouseData)
+                    xbtn = (md >> 16) & 0xFFFF
+                    if xbtn == target_xbutton:
+                        if wParam == WM_XBUTTONDOWN:
+                            self.clipboard_float_requested.emit()
+                        # 吞掉侧键默认行为（浏览器前进/后退）
+                        return 1
+                lparam_val = ctypes.cast(lParam, ctypes.c_void_p).value or 0
+                return user32.CallNextHookEx(None, nCode, wParam, wintypes.LPARAM(lparam_val))
+
+            self._clipboard_mouse_proc = MOUSEHOOKPROC(mouse_hook_proc)
+
+            def run_mouse_hook():
+                self._clipboard_mouse_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+                self._clipboard_mouse_hook = user32.SetWindowsHookExW(
+                    WH_MOUSE_LL,
+                    self._clipboard_mouse_proc,
+                    None,
+                    0
+                )
+                if self._clipboard_mouse_hook:
+                    msg = wintypes.MSG()
+                    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                        user32.TranslateMessage(ctypes.byref(msg))
+                        user32.DispatchMessageW(ctypes.byref(msg))
+
+            self._clipboard_mouse_thread = threading.Thread(target=run_mouse_hook, daemon=True)
+            self._clipboard_mouse_thread.start()
+        except Exception:
+            pass
     
     def _on_hotkey_changed(self):
         self._register_hotkey()
@@ -945,14 +1038,21 @@ class CapsuleWidget(QWidget):
             return
         
         if isinstance(data, tuple):
-            screen, start_pos = data
+            if len(data) >= 3:
+                screen, start_pos, prefetched = data[0], data[1], data[2]
+            else:
+                screen, start_pos = data[0], data[1]
+                prefetched = None
         else:
-            screen, start_pos = data, None
+            screen, start_pos, prefetched = data, None, None
             
-        # 立即启动截图，屏幕选择器已关闭
-        QTimer.singleShot(0, lambda: self._start_screenshot_on_screen(screen, start_pos))
+        # 立即启动截图，屏幕选择器已关闭（默认参数绑定，避免闭包滞后）
+        QTimer.singleShot(
+            0,
+            lambda s=screen, sp=start_pos, pf=prefetched: self._start_screenshot_on_screen(s, sp, pf),
+        )
     
-    def _start_screenshot_on_screen(self, screen, start_pos=None):
+    def _start_screenshot_on_screen(self, screen, start_pos=None, prefetched_pixmap=None):
         # 再次检查是否已有截图窗口
         if hasattr(self, 'overlay') and self.overlay is not None:
             try:
@@ -962,7 +1062,7 @@ class CapsuleWidget(QWidget):
                 self.overlay = None
         
         try:
-            self.overlay = ScreenshotOverlay(screen, start_pos)
+            self.overlay = ScreenshotOverlay(screen, start_pos, prefetched_pixmap)
             self.overlay.destroyed.connect(self._on_overlay_closed)
         except Exception as e:
             print(f"启动截图失败: {e}")
@@ -1015,8 +1115,23 @@ class CapsuleWidget(QWidget):
         self._settings_dialog.show()
     
     def _open_prompt_settings(self):
-        self.prompt_settings_window = PromptSettingsWindow()
-        self.prompt_settings_window.show()
+        # 统一入口：在设置面板内管理 Prompt
+        if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
+            try:
+                if self._settings_dialog.isVisible():
+                    self._settings_dialog.show_tab('prompt')
+                    self._settings_dialog.raise_()
+                    self._settings_dialog.activateWindow()
+                    return
+            except RuntimeError:
+                self._settings_dialog = None
+
+        self._settings_dialog = SettingsDialog(self)
+        self._settings_dialog.hotkey_changed.connect(self._on_hotkey_changed)
+        self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._settings_dialog.destroyed.connect(lambda: setattr(self, '_settings_dialog', None))
+        self._settings_dialog.show_tab('prompt')
+        self._settings_dialog.show()
     
     def _setup_tray_icon(self):
         """设置系统托盘图标"""
@@ -1030,30 +1145,7 @@ class CapsuleWidget(QWidget):
         
         # 创建托盘菜单
         self.tray_menu = QMenu()
-        self.tray_menu.setStyleSheet("""
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 6px 0;
-            }
-            QMenu::item {
-                padding: 10px 20px 10px 16px;
-                margin: 2px 6px;
-                border-radius: 6px;
-                font-size: 13px;
-                color: #333;
-            }
-            QMenu::item:selected {
-                background-color: #f0f0f0;
-                color: #000;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #e8e8e8;
-                margin: 6px 12px;
-            }
-        """)
+        self.tray_menu.setStyleSheet(MENU_STYLE)
         
         self.show_action = self.tray_menu.addAction(qta.icon('mdi6.eye-outline', color='#555'), "  显示胶囊")
         self.show_action.triggered.connect(self._toggle_capsule_visibility)
@@ -1345,34 +1437,7 @@ class CapsuleWidget(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
             menu = QMenu(self)
-            menu.setStyleSheet("""
-                QMenu {
-                    background-color: #ffffff;
-                    border: 1px solid #d0d0d0;
-                    border-radius: 6px;
-                    padding: 4px 0;
-                }
-                QMenu::item {
-                    padding: 6px 12px 6px 8px;
-                    margin: 0 4px;
-                    border-radius: 4px;
-                    font-size: 13px;
-                    color: #1d1d1f;
-                }
-                QMenu::item:selected {
-                    background-color: #007aff;
-                    color: #fff;
-                }
-                QMenu::icon {
-                    padding-left: 4px;
-                    padding-right: 2px;
-                }
-                QMenu::separator {
-                    height: 1px;
-                    background-color: #e5e5e5;
-                    margin: 4px 8px;
-                }
-            """)
+            menu.setStyleSheet(MENU_STYLE)
             prompt_action = menu.addAction(qta.icon('mdi6.text-box-edit-outline', color='#555'), "Prompt 管理")
             settings_action = menu.addAction(qta.icon('mdi6.cog-outline', color='#555'), "设置")
             menu.addSeparator()
@@ -1391,6 +1456,11 @@ if __name__ == "__main__":
     
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+
+    font = QFont("Microsoft YaHei UI", 9)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app.setFont(font)
     
     # 单实例检测
     shared_memory = QSharedMemory("ArtcoSingleInstanceLock")

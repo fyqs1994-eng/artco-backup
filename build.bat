@@ -47,7 +47,7 @@ exit /b 0
 :: 构建脱敏版
 :: ============================================
 :build_lite
-echo [1/3] 准备脱敏配置...
+echo [1/2] 准备脱敏配置...
 
 :: 创建临时目录
 if not exist "_build_tmp" mkdir "_build_tmp"
@@ -56,23 +56,11 @@ if not exist "_build_tmp" mkdir "_build_tmp"
 copy /y "ai_config_empty.json" "_build_tmp\ai_config.json" >nul
 echo       ai_config.json (API Key 已清空)
 
-:: 备份原文件
-copy /y "supabase_client.py" "_build_tmp\supabase_client.py.bak" >nul
-
-:: 用 Python 脱敏 supabase_client.py
-python -c "import re; f=open('supabase_client.py','r',encoding='utf-8'); c=f.read(); f.close(); c=re.sub(r'os\.getenv\(\"VITE_SUPABASE_URL\",\s*\"[^\"]*\"\)','os.getenv(\"VITE_SUPABASE_URL\", \"\")',c); c=re.sub(r'os\.getenv\(\"VITE_SUPABASE_ANON_KEY\",\s*\"[^\"]*\"\)','os.getenv(\"VITE_SUPABASE_ANON_KEY\", \"\")',c); f=open('supabase_client.py','w',encoding='utf-8'); f.write(c); f.close(); print('      supabase_client.py (Supabase 凭证已清空)')"
-
 echo.
-echo [2/3] 正在构建脱敏版 (Artco_Lite)...
+echo [2/2] 正在构建脱敏版 (Artco_Lite)...
 echo.
 pyinstaller Artco_Lite.spec --noconfirm
 set BUILD_RESULT=%errorlevel%
-
-:: 还原 supabase_client.py
-echo.
-echo [3/3] 还原源文件...
-copy /y "_build_tmp\supabase_client.py.bak" "supabase_client.py" >nul
-echo       supabase_client.py 已还原
 
 :: 清理临时目录
 rd /s /q "_build_tmp" 2>nul

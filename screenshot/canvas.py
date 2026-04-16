@@ -26,6 +26,8 @@ class EditorCanvas(QWidget):
     scale_changed = Signal(float)
     pan_requested = Signal(int, int)  # delta_x, delta_y
     number_dots_changed = Signal()  # 序号点增删时触发
+    number_dot_clicked = Signal(int)  # 点击序号点时触发
+
     
     def __init__(self, pixmap: QPixmap):
         super().__init__()
@@ -73,6 +75,7 @@ class EditorCanvas(QWidget):
         self._text_cursor_timer = QTimer(self)
         self._text_cursor_timer.timeout.connect(self._toggle_text_cursor)
         self.editing_text_mark: TextMark = None
+        self._text_caret = 0  # 插入光标在 _text_buffer 中的位置 0..len
     
     def _update_canvas_size(self):
         """根据缩放更新画布大小"""
@@ -142,6 +145,9 @@ class EditorCanvas(QWidget):
                 mark.points = old_pos
             elif isinstance(mark, TextMark):
                 mark.pos = old_pos
+        elif action == 'edit_text':
+            mark, old_text = data
+            mark.text = old_text
         
         self._deselect_all()
         self.update()
@@ -281,10 +287,32 @@ class EditorCanvas(QWidget):
                     path.lineTo(pts[-1])
                 painter.drawPath(path)
     
+    @staticmethod
+    def _caret_geometry_in_text(text: str, index: int, metrics: QFontMetrics, base_x: float, base_y: float):
+        """返回插入光标竖线顶点的 x、y 与行高（text 为含换行的完整虚拟串）。"""
+        line_height = metrics.height()
+        if index < 0:
+            index = 0
+        if index > len(text):
+            index = len(text)
+        before = text[:index]
+        lines = before.split('\n')
+        line_idx = len(lines) - 1
+        col = lines[-1]
+        x = base_x + metrics.horizontalAdvance(col)
+        y_top = base_y + line_idx * line_height
+        return x, y_top, line_height
+
+    def _virtual_edit_text(self) -> str:
+        return (
+            self._text_buffer[: self._text_caret]
+            + self._text_preedit
+            + self._text_buffer[self._text_caret :]
+        )
+
     def _draw_editing_text(self, painter: QPainter):
-        """绘制正在编辑的文本（即时渲染）"""
+        """绘制正在编辑的文本（即时渲染）— 坐标与 TextMark.draw 一致"""
         mark = self.editing_text_mark
-        # 缓存字体和 metrics，避免每帧重建
         if not hasattr(self, '_cached_edit_font') or self._cached_edit_font_size != mark.font_size:
             self._cached_edit_font = QFont(FONT_NAME, mark.font_size, QFont.Weight.Normal)
             self._cached_edit_metrics = QFontMetrics(self._cached_edit_font)
@@ -293,50 +321,50 @@ class EditorCanvas(QWidget):
         metrics = self._cached_edit_metrics
         painter.setFont(font)
         painter.setPen(mark.color)
-        # 合并已输入文本和预编辑文本
-        display_text = self._text_buffer + self._text_preedit
-        lines = display_text.split('\n')
+
+        virtual = self._virtual_edit_text()
+        lines = virtual.split('\n')
         line_height = metrics.height()
-        
-        x, y = mark.pos.x(), mark.pos.y()
-        
-        # 计算光标应该在的位置（在已确认文本之后，预编辑文本之前）
-        confirmed_lines = self._text_buffer.split('\n')
-        
+        padding = mark.padding
+
+        max_width = max((metrics.horizontalAdvance(line) for line in lines), default=0)
+        if max_width == 0:
+            max_width = metrics.horizontalAdvance("A")
+        total_height = line_height * len(lines) if lines else line_height
+        border_rect = QRect(
+            mark.pos.x(),
+            mark.pos.y(),
+            max_width + padding * 2,
+            total_height + padding * 2,
+        )
+        painter.save()
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(border_rect, 4, 4)
+        painter.restore()
+        painter.setPen(mark.color)
+
+        base_x = mark.pos.x() + padding
+        base_y = mark.pos.y() + padding
+
         for i, line in enumerate(lines):
-            text_y = y + (i + 1) * line_height
-            
-            # 检查这行是否包含预编辑文本
-            if i == len(confirmed_lines) - 1 and self._text_preedit:
-                # 先绘制确认的文本
-                confirmed_part = confirmed_lines[-1] if confirmed_lines else ""
-                painter.drawText(x, text_y, confirmed_part)
-                
-                # 绘制预编辑文本（带下划线）
-                preedit_x = x + metrics.horizontalAdvance(confirmed_part)
-                painter.drawText(preedit_x, text_y, self._text_preedit)
-                # 绘制下划线表示预编辑状态
-                preedit_width = metrics.horizontalAdvance(self._text_preedit)
-                painter.drawLine(int(preedit_x), int(text_y + 2), 
-                               int(preedit_x + preedit_width), int(text_y + 2))
-                
-                # 光标在预编辑文本之后
-                if self._text_cursor_visible:
-                    cursor_x = preedit_x + preedit_width
-                    cursor_y1 = y + i * line_height + 2
-                    cursor_y2 = cursor_y1 + line_height
-                    painter.setPen(QPen(mark.color, 2))
-                    painter.drawLine(int(cursor_x), int(cursor_y1), int(cursor_x), int(cursor_y2))
-            else:
-                painter.drawText(x, text_y, line)
-                
-                # 绘制光标（在最后一行末尾，且没有预编辑文本时）
-                if i == len(lines) - 1 and self._text_cursor_visible and not self._text_preedit:
-                    cursor_x = x + metrics.horizontalAdvance(line)
-                    cursor_y1 = y + i * line_height + 2
-                    cursor_y2 = cursor_y1 + line_height
-                    painter.setPen(QPen(mark.color, 2))
-                    painter.drawLine(int(cursor_x), int(cursor_y1), int(cursor_x), int(cursor_y2))
+            text_y = base_y + metrics.ascent() + i * line_height
+            painter.drawText(int(base_x), int(text_y), line)
+
+        if self._text_preedit:
+            pe = self._text_preedit
+            i0 = self._text_caret
+            i1 = i0 + len(pe)
+            x0, y0, lh = self._caret_geometry_in_text(virtual, i0, metrics, base_x, base_y)
+            x1, _, _ = self._caret_geometry_in_text(virtual, i1, metrics, base_x, base_y)
+            text_y = y0 + metrics.ascent()
+            painter.drawLine(int(x0), int(text_y + 2), int(x1), int(text_y + 2))
+
+        cursor_index = self._text_caret + len(self._text_preedit)
+        if self._text_cursor_visible:
+            cx, cy_top, lh = self._caret_geometry_in_text(virtual, cursor_index, metrics, base_x, base_y)
+            painter.setPen(QPen(mark.color, 2))
+            painter.drawLine(int(cx), int(cy_top), int(cx), int(cy_top + lh))
     
     def _toggle_text_cursor(self):
         """切换光标可见性"""
@@ -369,6 +397,8 @@ class EditorCanvas(QWidget):
                 # 记录移动前的位置用于撤销
                 if isinstance(mark, NumberDot):
                     self._move_start_pos = QPoint(mark.center)
+                    # 点击序号点时发出信号，聚焦到侧栏输入框
+                    self.number_dot_clicked.emit(mark.number)
                 elif isinstance(mark, RectMark):
                     self._move_start_pos = QRect(mark.rect)
                 elif isinstance(mark, ArrowMark):
@@ -378,6 +408,7 @@ class EditorCanvas(QWidget):
                 elif isinstance(mark, TextMark):
                     self._move_start_pos = QPoint(mark.pos)
             self.update()
+
         
         elif self.current_tool == self.TOOL_ERASER:
             self._erase_mark_at(pos)
@@ -400,12 +431,44 @@ class EditorCanvas(QWidget):
             self.temp_points = [pos]
         
         elif self.current_tool == self.TOOL_TEXT:
-            text_mark = TextMark(pos, "", self._mark_color)
-            self.marks.append(text_mark)
-            self._push_undo('add', text_mark)
-            self.editing_text_mark = text_mark
-            self._start_text_editing()
+            existing = self._find_mark_at(pos)
+            if isinstance(existing, TextMark):
+                self._start_editing_existing(existing)
+            else:
+                text_mark = TextMark(pos, "", self._mark_color)
+                self.marks.append(text_mark)
+                self._push_undo('add', text_mark)
+                self.editing_text_mark = text_mark
+                self._start_text_editing()
     
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = self._screen_to_canvas(event.pos())
+        if self._text_editing:
+            return
+        mark = self._find_mark_at(pos)
+        if isinstance(mark, TextMark):
+            self._start_editing_existing(mark)
+
+    def _start_editing_existing(self, mark: TextMark):
+        """Re-edit an existing committed TextMark."""
+        self._deselect_all()
+        self._text_edit_old_text = mark.text
+        self.editing_text_mark = mark
+        self._text_editing = True
+        self._text_buffer = mark.text
+        self._text_preedit = ""
+        self._text_caret = len(mark.text)
+        self._text_cursor_visible = True
+        self._text_cursor_timer.start(530)
+        mark.text = ""
+        mark.is_editing = True
+        self._text_font_size = mark.font_size
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        self.setFocus()
+        self.update()
+
     def mouseMoveEvent(self, event):
         # 中键平移
         if self._is_panning and event.buttons() & Qt.MouseButton.MiddleButton:
@@ -523,6 +586,7 @@ class EditorCanvas(QWidget):
         self._text_editing = True
         self._text_buffer = ""
         self._text_preedit = ""  # IME 预编辑文本
+        self._text_caret = 0
         self._text_cursor_visible = True
         self._text_cursor_timer.start(530)  # 光标闪烁间隔
         if self.editing_text_mark:
@@ -540,23 +604,40 @@ class EditorCanvas(QWidget):
         
         self._text_cursor_timer.stop()
         self._text_editing = False
-        self._text_preedit = ""  # 清空预编辑
-        
+        self._text_preedit = ""
+
+        old_text = getattr(self, '_text_edit_old_text', None)
+
         if self.editing_text_mark:
             text = self._text_buffer.strip()
             if text:
                 self.editing_text_mark.text = text
+                if old_text is not None:
+                    self._push_undo('edit_text', (self.editing_text_mark, old_text))
             else:
-                # 没有输入文字，删除标记
                 if self.editing_text_mark in self.marks:
                     self.marks.remove(self.editing_text_mark)
-                    # 撤销栈也移除
                     if self._undo_stack and self._undo_stack[-1] == ('add', self.editing_text_mark):
                         self._undo_stack.pop()
             self.editing_text_mark.is_editing = False
             self.editing_text_mark = None
         
+        self._text_edit_old_text = None
         self._text_buffer = ""
+        self._text_caret = 0
+        self.update()
+
+    def _abort_text_editing(self):
+        """取消编辑态（不提交）；再编辑按 ESC 时先恢复 mark.text 再调用本方法。"""
+        self._text_cursor_timer.stop()
+        self._text_editing = False
+        self._text_preedit = ""
+        if self.editing_text_mark:
+            self.editing_text_mark.is_editing = False
+            self.editing_text_mark = None
+        self._text_edit_old_text = None
+        self._text_buffer = ""
+        self._text_caret = 0
         self.update()
     
     def _change_text_font_size(self, delta: int):
@@ -569,6 +650,43 @@ class EditorCanvas(QWidget):
             if self.editing_text_mark:
                 self.editing_text_mark.font_size = self._text_font_size
             self.update()
+
+    def _cursor_line_start(self, buf: str, caret: int) -> int:
+        before = buf[:caret]
+        i = before.rfind('\n')
+        return 0 if i < 0 else i + 1
+
+    def _cursor_line_end(self, buf: str, caret: int) -> int:
+        j = buf.find('\n', caret)
+        return len(buf) if j < 0 else j
+
+    def _caret_move_up(self):
+        buf = self._text_buffer
+        c = self._text_caret
+        line_start = self._cursor_line_start(buf, c)
+        col = c - line_start
+        if line_start == 0:
+            self._text_caret = 0
+            return
+        prev_region = buf[: line_start - 1]
+        prev_nl = prev_region.rfind('\n')
+        prev_line_start = 0 if prev_nl < 0 else prev_nl + 1
+        prev_line_len = line_start - 1 - prev_line_start
+        self._text_caret = prev_line_start + min(col, prev_line_len)
+
+    def _caret_move_down(self):
+        buf = self._text_buffer
+        c = self._text_caret
+        line_end = self._cursor_line_end(buf, c)
+        if line_end >= len(buf):
+            return
+        line_start = self._cursor_line_start(buf, c)
+        col = c - line_start
+        next_line_start = line_end + 1
+        next_nl = buf.find('\n', next_line_start)
+        next_line_end = len(buf) if next_nl < 0 else next_nl
+        next_len = next_line_end - next_line_start
+        self._text_caret = next_line_start + min(col, next_len)
     
     def keyPressEvent(self, event: QKeyEvent):
         """键盘事件 - 处理即时渲染文本输入"""
@@ -580,7 +698,12 @@ class EditorCanvas(QWidget):
             if key == Qt.Key.Key_Return:
                 if modifiers & Qt.KeyboardModifier.ControlModifier:
                     # Ctrl+Enter 换行
-                    self._text_buffer += '\n'
+                    self._text_buffer = (
+                        self._text_buffer[: self._text_caret]
+                        + '\n'
+                        + self._text_buffer[self._text_caret :]
+                    )
+                    self._text_caret += 1
                     self.update()
                 else:
                     # Enter 确认
@@ -588,26 +711,82 @@ class EditorCanvas(QWidget):
                 return
             
             elif key == Qt.Key.Key_Escape:
-                # 取消输入
-                self._text_buffer = ""
-                self._finish_text_editing()
+                if getattr(self, '_text_edit_old_text', None) is not None:
+                    self.editing_text_mark.text = self._text_edit_old_text
+                    self._text_edit_old_text = None
+                    self._abort_text_editing()
+                else:
+                    self._text_buffer = ""
+                    self._text_caret = 0
+                    self._finish_text_editing()
                 return
             
             elif key == Qt.Key.Key_Backspace:
-                # 删除
-                if self._text_buffer:
-                    self._text_buffer = self._text_buffer[:-1]
+                if self._text_preedit:
+                    event.ignore()
+                    return
+                if self._text_caret > 0:
+                    self._text_buffer = (
+                        self._text_buffer[: self._text_caret - 1]
+                        + self._text_buffer[self._text_caret :]
+                    )
+                    self._text_caret -= 1
                     self.update()
+                return
+
+            elif key == Qt.Key.Key_Delete:
+                if self._text_preedit:
+                    event.ignore()
+                    return
+                if self._text_caret < len(self._text_buffer):
+                    self._text_buffer = (
+                        self._text_buffer[: self._text_caret]
+                        + self._text_buffer[self._text_caret + 1 :]
+                    )
+                    self.update()
+                return
+
+            elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Home, Qt.Key.Key_End):
+                if self._text_preedit:
+                    event.ignore()
+                    return
+                if key == Qt.Key.Key_Left:
+                    self._text_caret = max(0, self._text_caret - 1)
+                elif key == Qt.Key.Key_Right:
+                    self._text_caret = min(len(self._text_buffer), self._text_caret + 1)
+                elif key == Qt.Key.Key_Up:
+                    self._caret_move_up()
+                elif key == Qt.Key.Key_Down:
+                    self._caret_move_down()
+                elif key == Qt.Key.Key_Home:
+                    self._text_caret = self._cursor_line_start(self._text_buffer, self._text_caret)
+                elif key == Qt.Key.Key_End:
+                    self._text_caret = self._cursor_line_end(self._text_buffer, self._text_caret)
+                self._text_cursor_visible = True
+                self.update()
                 return
             
             else:
-                # 普通字符输入
+                # 修饰键、无字符键交给系统/输入法（避免 Shift 切换中英被吞）
+                if key in (
+                    Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt,
+                    Qt.Key.Key_Meta, Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock,
+                ):
+                    event.ignore()
+                    return
                 text = event.text()
                 if text and text.isprintable():
-                    self._text_buffer += text
-                    # 显示光标
+                    self._text_buffer = (
+                        self._text_buffer[: self._text_caret]
+                        + text
+                        + self._text_buffer[self._text_caret :]
+                    )
+                    self._text_caret += len(text)
                     self._text_cursor_visible = True
                     self.update()
+                    event.accept()
+                else:
+                    event.ignore()
                 return
         
         # 非文本输入状态的快捷键
@@ -621,12 +800,15 @@ class EditorCanvas(QWidget):
     def inputMethodEvent(self, event):
         """处理输入法事件（中文等IME输入）"""
         if self._text_editing:
-            # 获取预编辑文本（正在输入的拼音等）
             self._text_preedit = event.preeditString()
-            # 获取确认的文本
             commit_text = event.commitString()
             if commit_text:
-                self._text_buffer += commit_text
+                self._text_buffer = (
+                    self._text_buffer[: self._text_caret]
+                    + commit_text
+                    + self._text_buffer[self._text_caret :]
+                )
+                self._text_caret += len(commit_text)
                 self._text_preedit = ""
             self._text_cursor_visible = True
             self.update()
@@ -640,23 +822,18 @@ class EditorCanvas(QWidget):
         if query == Qt.InputMethodQuery.ImEnabled:
             return self._text_editing
         elif query == Qt.InputMethodQuery.ImCursorRectangle:
-            # 返回输入光标位置
             if self._text_editing and self.editing_text_mark:
                 mark = self.editing_text_mark
                 font = QFont(FONT_NAME, mark.font_size)
                 metrics = QFontMetrics(font)
-                lines = self._text_buffer.split('\n')
-                line_height = metrics.height()
-                
-                # 计算光标位置
-                canvas_x = mark.pos.x()
-                canvas_y = mark.pos.y()
-                if lines:
-                    last_line = lines[-1]
-                    canvas_x += metrics.horizontalAdvance(last_line)
-                    canvas_y += (len(lines) - 1) * line_height
-                
-                # 转换为屏幕坐标
-                screen_pos = self._canvas_to_screen(QPointF(canvas_x, canvas_y))
-                return QRect(int(screen_pos.x()), int(screen_pos.y()), 2, line_height)
+                virtual = self._virtual_edit_text()
+                idx = self._text_caret + len(self._text_preedit)
+                padding = mark.padding
+                base_x = float(mark.pos.x() + padding)
+                base_y = float(mark.pos.y() + padding)
+                cx, cy_top, lh = self._caret_geometry_in_text(
+                    virtual, idx, metrics, base_x, base_y
+                )
+                screen_pos = self._canvas_to_screen(QPointF(cx, cy_top))
+                return QRect(int(screen_pos.x()), int(screen_pos.y()), 2, int(lh))
         return super().inputMethodQuery(query)

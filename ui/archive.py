@@ -814,20 +814,89 @@ class ArchiveCard(QWidget):
 # 剪贴板历史相关类
 # ============================================================
 
+# 资源管理器里「复制」单个图片文件时，剪贴板多为 URL/路径；按扩展名加载为位图，历史里存图片而非路径
+_CLIPBOARD_IMAGE_FILE_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".ico",
+})
+_MAX_CLIPBOARD_IMAGE_FILE_BYTES = 256 * 1024 * 1024  # 超过则仍按「文件」记录，避免内存爆
+
+
+def _is_probably_image_file(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _CLIPBOARD_IMAGE_FILE_EXTENSIONS
+
+
+def _load_pixmap_from_local_image_file(path: str) -> Optional[QPixmap]:
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        if os.path.getsize(path) > _MAX_CLIPBOARD_IMAGE_FILE_BYTES:
+            return None
+    except OSError:
+        return None
+    pm = QPixmap(path)
+    if pm.isNull():
+        return None
+    return pm
+
+
 class ClipboardItem:
     """剪贴板历史项"""
-    def __init__(self, content_type: str, content: Any, timestamp: datetime = None):
-        self.content_type = content_type  # "image" 或 "text"
-        self.content = content  # QPixmap 或 str
+    def __init__(
+        self,
+        content_type: str,
+        content: Any,
+        timestamp: datetime = None,
+        source_file_path: Optional[str] = None,
+    ):
+        self.content_type = content_type  # "image" | "text" | "file"
+        self.content = content  # QPixmap | str | List[str]（本地路径）
         self.timestamp = timestamp or datetime.now()
         self.id = f"{self.timestamp.timestamp():.6f}"
+        self.source_file_path = os.path.normpath(source_file_path) if source_file_path else None
+    
+    def file_paths(self) -> List[str]:
+        """file 类型：本地路径列表（其它类型为空）"""
+        if self.content_type != "file":
+            return []
+        c = self.content
+        if isinstance(c, list):
+            return [p for p in c if p]
+        return [c] if c else []
+    
+    def get_detail_plain_text(self) -> str:
+        """详情弹窗展示的纯文本"""
+        if self.content_type == "file":
+            return "\n".join(self.file_paths())
+        if self.content_type == "text":
+            return self.content
+        return ""
     
     def get_preview_text(self, max_len: int = 100) -> str:
         """获取预览文本"""
         if self.content_type == "text":
             text = self.content.replace('\n', ' ').strip()
             return text[:max_len] + "..." if len(text) > max_len else text
+        if self.content_type == "file":
+            paths = self.file_paths()
+            if not paths:
+                return ""
+            if len(paths) == 1:
+                s = os.path.basename(paths[0])
+            else:
+                s = f"{len(paths)} 个文件"
+            return s[:max_len] + "..." if len(s) > max_len else s
         return ""
+    
+    def try_get_pixmap(self) -> Optional[QPixmap]:
+        """image 直接返回；file 为单个图片路径时尝试加载（用于写入剪贴板为图片而非路径）"""
+        if self.content_type == "image":
+            pm = self.content
+            return pm if pm and not pm.isNull() else None
+        if self.content_type == "file":
+            paths = self.file_paths()
+            if len(paths) == 1 and _is_probably_image_file(paths[0]):
+                return _load_pixmap_from_local_image_file(paths[0])
+        return None
 
 
 class ClipboardHistoryManager:
@@ -874,6 +943,32 @@ class ClipboardHistoryManager:
         """剪贴板内容变化（优化版：增强兼容性）"""
         clipboard = QApplication.clipboard()
         mime_data = clipboard.mimeData()
+        
+        # 本地文件（优先于文本）：避免大文件复制时把整段路径当文本塞进历史格子
+        if mime_data.hasUrls():
+            local_paths: List[str] = []
+            seen = set()
+            for u in mime_data.urls():
+                if u.isLocalFile():
+                    p = os.path.normpath(u.toLocalFile())
+                    if p and p not in seen:
+                        seen.add(p)
+                        local_paths.append(p)
+            if local_paths:
+                # 单文件且为常见图片格式：载入为位图，剪贴板历史里存「图片」而不是路径
+                if len(local_paths) == 1 and _is_probably_image_file(local_paths[0]):
+                    pm = _load_pixmap_from_local_image_file(local_paths[0])
+                    if pm is not None and not pm.isNull():
+                        content_hash = self._compute_image_hash(pm)
+                        if content_hash and content_hash != self._last_content_hash:
+                            self._last_content_hash = content_hash
+                            self._add_item(ClipboardItem("image", pm, source_file_path=local_paths[0]))
+                        return
+                content_hash = hash(tuple(local_paths))
+                if content_hash != self._last_content_hash:
+                    self._last_content_hash = content_hash
+                    self._add_item(ClipboardItem("file", local_paths))
+                return
         
         if mime_data.hasImage():
             # 尝试多种方式获取图片
@@ -934,8 +1029,9 @@ class ClipboardHistoryManager:
         """计算剪贴板项的哈希值"""
         if item.content_type == "image":
             return self._compute_image_hash(item.content)
-        else:  # text
-            return hash(item.content)
+        if item.content_type == "file":
+            return hash(tuple(os.path.normcase(p) for p in item.file_paths()))
+        return hash(item.content)
     
     def _get_image_from_mime_data(self, mime_data, clipboard) -> QPixmap:
         """从 MIME 数据中获取图片（多方式尝试）"""
@@ -1098,6 +1194,19 @@ class ClipboardCard(QWidget):
             self.type_badge.setObjectName("type_badge_image")
             self.type_badge.adjustSize()
             self.type_badge.move(6, 6)
+        elif self.item.content_type == "file":
+            text_label = QLabel()
+            text_label.setFixedSize(152, 122)
+            text_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            text_label.setWordWrap(True)
+            text_label.setObjectName("text_preview")
+            text_label.setText(self.item.get_preview_text(150))
+            content_layout.addWidget(text_label)
+            self.type_badge = QLabel(self.content_container)
+            self.type_badge.setText("文件")
+            self.type_badge.setObjectName("type_badge_file")
+            self.type_badge.adjustSize()
+            self.type_badge.move(6, 6)
         else:
             # 文本类型
             text_label = QLabel()
@@ -1177,6 +1286,14 @@ class ClipboardCard(QWidget):
                 padding: 2px 6px;
                 border-radius: 3px;
             }
+            QLabel#type_badge_file {
+                background-color: rgba(245, 158, 11, 0.95);
+                color: white;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 2px 6px;
+                border-radius: 3px;
+            }
             QPushButton#btn_delete_overlay {
                 background-color: rgba(0, 0, 0, 0.5);
                 border: none;
@@ -1216,7 +1333,7 @@ class ClipboardTextDetailDialog(QWidget):
     def __init__(self, item: ClipboardItem, parent=None):
         super().__init__(parent)
         self.item = item
-        self.setWindowTitle("文本详情")
+        self.setWindowTitle("文件详情" if item.content_type == "file" else "文本详情")
         self.setWindowFlags(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setMinimumSize(500, 400)
@@ -1251,9 +1368,10 @@ class ClipboardTextDetailDialog(QWidget):
         
         layout.addLayout(header_layout)
         
+        detail_text = self.item.get_detail_plain_text()
         # 文本内容
         self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(self.item.content)
+        self.text_edit.setPlainText(detail_text)
         self.text_edit.setReadOnly(True)
         self.text_edit.setStyleSheet(f"""
             QTextEdit {{
@@ -1269,9 +1387,13 @@ class ClipboardTextDetailDialog(QWidget):
         layout.addWidget(self.text_edit)
         
         # 字符统计
-        char_count = len(self.item.content)
-        line_count = self.item.content.count('\n') + 1
-        stats_label = QLabel(f"共 {char_count} 个字符，{line_count} 行")
+        if self.item.content_type == "file":
+            n = len(self.item.file_paths())
+            stats_label = QLabel(f"共 {n} 个文件")
+        else:
+            char_count = len(detail_text)
+            line_count = detail_text.count('\n') + 1
+            stats_label = QLabel(f"共 {char_count} 个字符，{line_count} 行")
         stats_label.setStyleSheet("color: #999; font-size: 12px;")
         stats_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         layout.addWidget(stats_label)
@@ -1289,8 +1411,22 @@ class ClipboardTextDetailDialog(QWidget):
         """)
     
     def _copy_text(self):
-        """复制文本"""
-        QGuiApplication.clipboard().setText(self.item.content)
+        """复制到剪贴板（优先图片数据，否则文件 URL 或纯文本）"""
+        pm = self.item.try_get_pixmap()
+        if pm is not None and not pm.isNull():
+            QGuiApplication.clipboard().setPixmap(pm)
+            try:
+                QGuiApplication.clipboard().setImage(pm.toImage())
+            except Exception:
+                pass
+            return
+        if self.item.content_type == "file":
+            paths = self.item.file_paths()
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+            QGuiApplication.clipboard().setMimeData(mime)
+        else:
+            QGuiApplication.clipboard().setText(self.item.content)
 
 
 class ClipboardImageViewer(QWidget):
@@ -1492,7 +1628,7 @@ class ClipboardHistoryPanel(QWidget):
         layout.addWidget(self.scroll_area)
         
         # 空状态
-        self.empty_label = QLabel("剪贴板历史为空\n\n复制图片或文本后将自动记录")
+        self.empty_label = QLabel("剪贴板历史为空\n\n复制图片、文本或文件后将自动记录")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setStyleSheet("color: #999; font-size: 14px;")
         self.empty_label.hide()
@@ -1551,12 +1687,10 @@ class ClipboardHistoryPanel(QWidget):
         self._viewers = valid_viewers
         
         if item.content_type == "image":
-            # 图片：打开图片查看器
             viewer = ClipboardImageViewer(item)
             viewer.show()
             self._viewers.append(viewer)
         else:
-            # 文本：打开文本详情
             dialog = ClipboardTextDetailDialog(item)
             dialog.show()
             self._viewers.append(dialog)

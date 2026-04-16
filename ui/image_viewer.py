@@ -1782,7 +1782,7 @@ class ImageViewer(QWidget):
             pass
 
     def _submit_to_inbox(self):
-        """供应商提交：复制当前文件到工作区 `_INBOX` 并写入元数据。"""
+        """将当前文件复制到工作区 `_INBOX` 并写入元数据。"""
         if not self._current_path or not self._current_path.exists():
             QMessageBox.warning(self, "提交失败", "当前没有可提交的文件")
             return
@@ -1824,17 +1824,6 @@ class ImageViewer(QWidget):
                 return None
             return (dialog.textValue() or "").strip()
 
-        # 供应商公司名（用于分流）
-        vendor = workspace_config.get_vendor_company()
-        if not vendor:
-            vendor = _ask_text("供应商公司", "请输入供应商公司名称（用于 _INBOX 分流）：")
-            if vendor is None:
-                return
-            if not vendor:
-                QMessageBox.warning(self, "提交失败", "供应商公司名称不能为空")
-                return
-            workspace_config.set_vendor_company(vendor)
-
         # 从路径推断 topic / rtype
         topic = ""
         rtype = ""
@@ -1865,7 +1854,7 @@ class ImageViewer(QWidget):
 
         submission_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
-        inbox_dir = workspace_root / "_INBOX" / vendor / topic / rtype
+        inbox_dir = workspace_root / "_INBOX" / topic / rtype
         inbox_dir.mkdir(parents=True, exist_ok=True)
 
         dest_name = f"{submission_id}_{version}_{self._current_path.name}"
@@ -1879,7 +1868,6 @@ class ImageViewer(QWidget):
 
         meta = {
             "submission_id": submission_id,
-            "vendor": vendor,
             "topic": topic,
             "rtype": rtype,
             "version": version,

@@ -13,7 +13,7 @@ Artco 统一设计系统 - 浅色模式 (Ant Design 风格)
 # ============================================================
 
 # 主字体栈（用于 QSS font-family）
-FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', Roboto, sans-serif"
+FONT_FAMILY = "'Microsoft YaHei UI', 'Segoe UI', sans-serif"
 
 # 等宽字体栈（用于代码、路径显示）
 FONT_FAMILY_MONO = "'Cascadia Code', 'Consolas', 'Microsoft YaHei', monospace"
@@ -276,6 +276,113 @@ def get_scrollbar_style():
         QScrollBar::add-page:vertical,
         QScrollBar::sub-page:vertical {{
             background: transparent;
+        }}
+    """
+
+
+def get_management_panel_style(container_selector: str = "QWidget"):
+    """管理类双栏面板通用壳层样式（设置/Prompt 管理）。"""
+    return f"""
+        {container_selector} {{
+            background-color: {BG_PRIMARY};
+            color: {TEXT_PRIMARY};
+            font-family: {FONT_FAMILY};
+            font-size: {FONT_SIZE_MD}px;
+        }}
+        QWidget#mgmt_left_panel, QWidget#mgmt_right_panel {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+        }}
+        QWidget#mgmt_left_panel {{
+            padding: 0;
+        }}
+        QWidget#mgmt_right_panel {{
+            padding: 0;
+        }}
+        QWidget#mgmt_secondary_shell, QFrame#mgmt_secondary_shell {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+        }}
+        QLabel#mgmt_section_title {{
+            color: {TEXT_PRIMARY};
+            font-size: {FONT_SIZE_XL}px;
+            font-weight: 600;
+            margin: 0 0 {SPACING_SM}px 0;
+        }}
+        QLabel#mgmt_card_title {{
+            color: {TEXT_SECONDARY};
+            font-size: {FONT_SIZE_SM}px;
+            font-weight: 600;
+            margin: {SPACING_SM}px 0 0 0;
+        }}
+        QLabel#mgmt_helper_text {{
+            color: {TEXT_TERTIARY};
+            font-size: {FONT_SIZE_SM}px;
+        }}
+        QFrame#mgmt_section_card, QWidget#mgmt_section_card {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+        }}
+        QGroupBox {{
+            border: none;
+            border-radius: 0;
+            margin-top: 10px;
+            padding-top: 10px;
+            background-color: transparent;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 0;
+            padding: 0;
+            color: {TEXT_PRIMARY};
+            font-size: {FONT_SIZE_MD}px;
+            font-weight: 600;
+        }}
+        QListWidget#mgmt_list {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            font-size: {FONT_SIZE_MD}px;
+            color: {TEXT_PRIMARY};
+            outline: none;
+        }}
+        QListWidget#mgmt_list::item {{
+            padding: 9px 10px;
+            border-radius: {RADIUS_SM}px;
+            margin: 1px 0;
+        }}
+        QListWidget#mgmt_list::item:selected {{
+            background-color: {ACCENT_SUBTLE};
+            color: {ACCENT_PRIMARY};
+        }}
+        QListWidget#mgmt_list::item:hover:!selected {{
+            background-color: {BG_HOVER};
+        }}
+        QListWidget#mgmt_secondary_list {{
+            background-color: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            font-size: {FONT_SIZE_MD}px;
+            color: {TEXT_PRIMARY};
+            outline: none;
+        }}
+        QListWidget#mgmt_secondary_list::item {{
+            padding: 10px 12px;
+            border-radius: {RADIUS_SM}px;
+            margin: 2px 0;
+        }}
+        QListWidget#mgmt_secondary_list::item:selected {{
+            background-color: {ACCENT_SUBTLE};
+            color: {ACCENT_PRIMARY};
+            font-weight: 600;
+        }}
+        QListWidget#mgmt_secondary_list::item:hover:!selected {{
+            background-color: {BG_HOVER};
         }}
     """
 
@@ -597,4 +704,38 @@ def get_dialog_style():
             border-color: {ACCENT_PRIMARY};
         }}
     """
+
+
+# ── 右键菜单统一样式 ──
+MENU_STYLE = """
+    QMenu {
+        background-color: #ffffff;
+        border: 1px solid #d0d0d0;
+        border-radius: 6px;
+        padding: 4px 0;
+    }
+    QMenu::item {
+        padding: 6px 12px 6px 8px;
+        margin: 0 4px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: #1d1d1f;
+    }
+    QMenu::item:selected {
+        background-color: #007aff;
+        color: #fff;
+    }
+    QMenu::item:disabled {
+        color: #999;
+    }
+    QMenu::icon {
+        padding-left: 4px;
+        padding-right: 2px;
+    }
+    QMenu::separator {
+        height: 1px;
+        background-color: #e5e5e5;
+        margin: 4px 8px;
+    }
+"""
 

@@ -7,42 +7,46 @@ from PySide6.QtCore import Qt, QRect, QPoint, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 import qtawesome as qta
 
+from config import ps_config
+from ui.theme import MENU_STYLE
+
 
 class PinWindow(QWidget):
     """屏幕贴图窗口 - 类似 Snipaste 的 Pin 功能"""
-    
+
     # 请求编辑信号：发送当前图片的 pixmap
     edit_requested = Signal(QPixmap)
-    
+
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
-        
+
         self._original_pixmap = pixmap
         self._scale = 1.0
         self._min_scale = 0.1
         self._max_scale = 5.0
         self._opacity = 1.0
-        
+
         # 缩略图模式（类似 Setuna）
         self._thumbnail_mode = False
-        self._thumbnail_size = 64  # 缩略图方块大小
+        self._thumbnail_size = ps_config.get_thumbnail_size()  # 缩略图方块大小
         self._saved_scale = 1.0    # 保存进入缩略图前的缩放比例
         self._saved_pos = None     # 保存进入缩略图前的位置
-        
+        self._cropped_pixmap = None  # 裁剪后的图片（用于裁剪缩小模式）
+
         # 获取原始 devicePixelRatio
         self._device_pixel_ratio = pixmap.devicePixelRatio()
-        
+
         # 计算逻辑尺寸（基础尺寸）
         self._base_width = int(pixmap.width() / self._device_pixel_ratio)
         self._base_height = int(pixmap.height() / self._device_pixel_ratio)
-        
+
         # 拖拽状态
         self._dragging = False
         self._drag_start_pos = QPoint()
-        
+
         # 阴影边距
         self._shadow_margin = 8
-        
+
         self._init_window()
         self._update_size()
     
@@ -100,7 +104,7 @@ class PinWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
+
         if self._thumbnail_mode:
             # 缩略图模式绘制
             img_rect = QRect(
@@ -109,62 +113,63 @@ class PinWindow(QWidget):
                 self._thumbnail_size,
                 self._thumbnail_size
             )
-            
-            # 动态阴影
+
+            # 动态阴影（方形，无圆角）
             shadow_layers = self._get_shadow_params(self._thumbnail_size)
-            corner_radius = 6
             for offset, alpha in shadow_layers:
                 shadow_rect = img_rect.adjusted(-offset, -offset, offset, offset)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(0, 0, 0, alpha))
-                painter.drawRoundedRect(shadow_rect, corner_radius, corner_radius)
-            
+                painter.drawRect(shadow_rect)
+
             # 设置透明度
             painter.setOpacity(self._opacity)
-            
-            # 绘制缩略图（裁剪为正方形并缩放）
-            # 从原图中心裁剪正方形
-            src_size = min(self._original_pixmap.width(), self._original_pixmap.height())
-            src_x = (self._original_pixmap.width() - src_size) // 2
-            src_y = (self._original_pixmap.height() - src_size) // 2
-            src_rect = QRect(src_x, src_y, src_size, src_size)
-            
-            painter.drawPixmap(img_rect, self._original_pixmap, src_rect)
-            
-            # 绘制圆角边框
+
+            # 绘制缩略图
+            if self._cropped_pixmap:
+                # 使用裁剪后的图片
+                painter.drawPixmap(img_rect, self._cropped_pixmap)
+            else:
+                # 从原图中心裁剪正方形（兼容旧模式）
+                src_size = min(self._original_pixmap.width(), self._original_pixmap.height())
+                src_x = (self._original_pixmap.width() - src_size) // 2
+                src_y = (self._original_pixmap.height() - src_size) // 2
+                src_rect = QRect(src_x, src_y, src_size, src_size)
+                painter.drawPixmap(img_rect, self._original_pixmap, src_rect)
+
+            # 绘制方形边框
             painter.setOpacity(1.0)
             painter.setPen(QPen(QColor(100, 100, 100, 200), 1.5))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(img_rect, corner_radius, corner_radius)
+            painter.drawRect(img_rect)
         else:
             # 正常模式绘制
             scaled_width = int(self._base_width * self._scale)
             scaled_height = int(self._base_height * self._scale)
-            
+
             img_rect = QRect(
                 self._shadow_margin,
                 self._shadow_margin,
                 scaled_width,
                 scaled_height
             )
-            
-            # 动态阴影：基于图片较小边计算
+
+            # 动态阴影（方形，无圆角）
             min_side = min(scaled_width, scaled_height)
             shadow_layers = self._get_shadow_params(min_side)
-            corner_radius = max(2, int(4 * min(1.0, min_side / 200)))
-            
+
             for offset, alpha in shadow_layers:
                 shadow_rect = img_rect.adjusted(-offset, -offset, offset, offset)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(0, 0, 0, alpha))
-                painter.drawRoundedRect(shadow_rect, corner_radius, corner_radius)
-            
+                painter.drawRect(shadow_rect)
+
             # 设置透明度
             painter.setOpacity(self._opacity)
-            
+
             # 直接绘制原图到目标区域（让 Qt/GPU 处理缩放）
             painter.drawPixmap(img_rect, self._original_pixmap)
-            
+
             # 绘制边框
             painter.setOpacity(1.0)
             painter.setPen(QPen(QColor(200, 200, 200, 150), 1))
@@ -178,29 +183,30 @@ class PinWindow(QWidget):
             self._drag_start_pos = event.globalPosition().toPoint() - self.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         event.accept()
-    
+
     def mouseMoveEvent(self, event):
         """鼠标移动 - 拖拽窗口"""
         if self._dragging:
             new_pos = event.globalPosition().toPoint() - self._drag_start_pos
             self.move(new_pos)
         event.accept()
-    
+
     def mouseReleaseEvent(self, event):
         """鼠标释放 - 结束拖拽"""
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         event.accept()
-    
+
     def mouseDoubleClickEvent(self, event):
         """双击 - 切换缩略图模式（类似 Setuna）"""
         if event.button() == Qt.MouseButton.LeftButton:
             if self._thumbnail_mode:
                 # 从缩略图模式恢复
                 self._thumbnail_mode = False
+                self._cropped_pixmap = None
                 self._scale = self._saved_scale
-                
+
                 # 计算恢复后的位置，使窗口中心保持不变
                 thumb_center = self.geometry().center()
                 self._update_size()
@@ -208,18 +214,89 @@ class PinWindow(QWidget):
                 new_geo.moveCenter(thumb_center)
                 self.move(new_geo.topLeft())
             else:
-                # 进入缩略图模式
-                self._saved_scale = self._scale
-                self._thumbnail_mode = True
-                
-                # 计算缩略图位置，使窗口中心保持不变
-                old_center = self.geometry().center()
-                self._update_size()
-                new_geo = self.geometry()
-                new_geo.moveCenter(old_center)
-                self.move(new_geo.topLeft())
+                # 检查是否启用裁剪缩小模式
+                if ps_config.get_crop_shrink_enabled():
+                    # 使用窗口内坐标来计算裁剪
+                    local_pos = event.position().toPoint()
+                    global_pos = event.globalPosition().toPoint()
+                    self._auto_crop_at_mouse(local_pos, global_pos)
+                else:
+                    # 进入整体缩略图模式（原有行为）
+                    self._saved_scale = self._scale
+                    self._thumbnail_mode = True
+
+                    # 计算缩略图位置，使窗口中心保持不变
+                    old_center = self.geometry().center()
+                    self._update_size()
+                    new_geo = self.geometry()
+                    new_geo.moveCenter(old_center)
+                    self.move(new_geo.topLeft())
         event.accept()
-    
+
+    def _auto_crop_at_mouse(self, local_pos: QPoint, global_pos: QPoint):
+        """以鼠标位置为中心自动裁剪"""
+        # 计算图片区域
+        scaled_width = int(self._base_width * self._scale)
+        scaled_height = int(self._base_height * self._scale)
+        img_left = self._shadow_margin
+        img_top = self._shadow_margin
+
+        # 使用窗口内坐标计算鼠标在图片中的相对位置
+        mouse_x = local_pos.x() - img_left
+        mouse_y = local_pos.y() - img_top
+
+        # 确保鼠标在图片区域内
+        if mouse_x < 0 or mouse_x > scaled_width or mouse_y < 0 or mouse_y > scaled_height:
+            # 鼠标在图片外，使用原有行为
+            self._saved_scale = self._scale
+            self._thumbnail_mode = True
+            old_center = self.geometry().center()
+            self._update_size()
+            new_geo = self.geometry()
+            new_geo.moveCenter(old_center)
+            self.move(new_geo.topLeft())
+            return
+
+        # 计算裁剪区域大小（以缩略图大小为基准，按比例计算）
+        crop_size = self._thumbnail_size * self._scale
+        half_crop = crop_size / 2
+
+        # 计算裁剪区域（可能超出图片边界）
+        src_x = int((mouse_x - half_crop) / self._scale * self._device_pixel_ratio)
+        src_y = int((mouse_y - half_crop) / self._scale * self._device_pixel_ratio)
+        src_w = int(crop_size / self._scale * self._device_pixel_ratio)
+        src_h = int(crop_size / self._scale * self._device_pixel_ratio)
+
+        # 确保裁剪区域在原始图片范围内
+        src_x = max(0, min(src_x, self._original_pixmap.width() - 1))
+        src_y = max(0, min(src_y, self._original_pixmap.height() - 1))
+        src_w = min(src_w, self._original_pixmap.width() - src_x)
+        src_h = min(src_h, self._original_pixmap.height() - src_y)
+
+        # 创建裁剪矩形
+        crop_rect = QRect(src_x, src_y, src_w, src_h)
+
+        # 裁剪图片
+        self._cropped_pixmap = self._original_pixmap.copy(crop_rect)
+
+        # 进入缩略图模式
+        self._saved_scale = self._scale
+        self._thumbnail_mode = True
+        self._thumbnail_size = ps_config.get_thumbnail_size()
+
+        # 计算缩略图位置，使裁剪区域中心对准全局鼠标位置
+        # 需要将窗口移动到全局坐标
+        crop_center_x = self._shadow_margin + self._thumbnail_size // 2
+        crop_center_y = self._shadow_margin + self._thumbnail_size // 2
+
+        # 窗口左上角位置 = 全局鼠标位置 - 裁剪区域中心
+        new_x = global_pos.x() - crop_center_x
+        new_y = global_pos.y() - crop_center_y
+
+        # 移动窗口
+        self.move(new_x, new_y)
+        self._update_size()
+
     def wheelEvent(self, event):
         """滚轮 - 以鼠标为中心缩放（缩略图模式下禁用）"""
         # 缩略图模式下不允许滚轮缩放
@@ -312,37 +389,7 @@ class PinWindow(QWidget):
     def contextMenuEvent(self, event):
         """右键菜单"""
         menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #d0d0d0;
-                border-radius: 6px;
-                padding: 4px 0;
-            }
-            QMenu::item {
-                padding: 6px 12px 6px 8px;
-                margin: 0 4px;
-                border-radius: 4px;
-                font-size: 13px;
-                color: #1d1d1f;
-            }
-            QMenu::item:selected {
-                background-color: #007aff;
-                color: #fff;
-            }
-            QMenu::item:disabled {
-                color: #999;
-            }
-            QMenu::icon {
-                padding-left: 4px;
-                padding-right: 2px;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #e5e5e5;
-                margin: 4px 8px;
-            }
-        """)
+        menu.setStyleSheet(MENU_STYLE)
         
         # 透明度子菜单
         opacity_menu = menu.addMenu(qta.icon('mdi6.opacity', color='#555'), "透明度")
@@ -377,7 +424,7 @@ class PinWindow(QWidget):
         else:
             thumbnail_action = menu.addAction(qta.icon('mdi6.image-filter-center-focus', color='#555'), "退出缩略图")
         thumbnail_action.triggered.connect(self._toggle_thumbnail_mode)
-        
+
         reset_action = menu.addAction(qta.icon('mdi6.backup-restore', color='#555'), "还原大小")
         reset_action.setEnabled(not self._thumbnail_mode)
         reset_action.triggered.connect(self._reset_scale)
@@ -410,24 +457,25 @@ class PinWindow(QWidget):
         if self._thumbnail_mode:
             # 从缩略图模式恢复
             self._thumbnail_mode = False
+            self._cropped_pixmap = None
             self._scale = self._saved_scale
-            
+
             thumb_center = self.geometry().center()
             self._update_size()
             new_geo = self.geometry()
             new_geo.moveCenter(thumb_center)
             self.move(new_geo.topLeft())
         else:
-            # 进入缩略图模式
+            # 进入缩略图模式（整体缩小，保持原有行为）
             self._saved_scale = self._scale
             self._thumbnail_mode = True
-            
+
             old_center = self.geometry().center()
             self._update_size()
             new_geo = self.geometry()
             new_geo.moveCenter(old_center)
             self.move(new_geo.topLeft())
-    
+
     def _save_image(self):
         """保存图片"""
         file_path, _ = QFileDialog.getSaveFileName(

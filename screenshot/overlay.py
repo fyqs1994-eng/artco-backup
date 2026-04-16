@@ -4,13 +4,16 @@
 
 import base64
 import math
+import os
+import subprocess
+import uuid
 
-from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QFileDialog
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QFileDialog, QMessageBox
 from PySide6.QtCore import Qt, QRect, QSize, Signal, QBuffer, QIODevice, QTimer, QPoint, Property, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QGuiApplication, QPixmap, QFont, QKeyEvent, QCursor, QFontMetrics
 
 from database import add_record
-from ui import PromptSelectMenu, PromptSettingsWindow
+from ui import PromptSelectMenu, SettingsDialog
 from .marks import FONT_NAME
 from .utils import parse_hotkey
 from .marks import MarkObject, RectMark, ArrowMark, FreehandMark, TextMark
@@ -20,10 +23,27 @@ from .editor import EditorWindow
 from .cache import get_cached_hotkeys, invalidate_hotkey_cache
 
 
+def _overlay_caret_geometry(
+    text: str, index: int, metrics: QFontMetrics, base_x: float, base_y: float
+):
+    line_height = metrics.height()
+    if index < 0:
+        index = 0
+    if index > len(text):
+        index = len(text)
+    before = text[:index]
+    lines = before.split('\n')
+    line_idx = len(lines) - 1
+    col = lines[-1]
+    x = base_x + metrics.horizontalAdvance(col)
+    y_top = base_y + line_idx * line_height
+    return x, y_top, line_height
+
+
 class ScreenSelectorWindow(QWidget):
     """单个屏幕的选择器窗口"""
     screen_selected = Signal(object)  # 改名，表示屏幕被选中（悬停或拖动）
-    drag_started = Signal(object, object)  # 新信号：(screen, start_pos)
+    drag_started = Signal(object, object)  # (screen, start_pos)
     
     def __init__(self, screen):
         super().__init__()
@@ -99,12 +119,12 @@ class ScreenSelectorWindow(QWidget):
     def mouseMoveEvent(self, event):
         if self._press_pos is not None:
             delta = event.pos() - self._press_pos
-            if delta.manhattanLength() > 5:  # 超过 5px 视为拖动
+            if delta.manhattanLength() > 4:  # 超过 4px 视为拖动
                 self._dragged = True
                 global_pos = self.mapToGlobal(self._press_pos)
                 self._press_pos = None
                 self.drag_started.emit(self.screen, global_pos)
-                self.hide()
+                # emit 同步关闭本窗口（WA_DeleteOnClose），勿再 hide
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
@@ -112,7 +132,7 @@ class ScreenSelectorWindow(QWidget):
                 # 单击：选择屏幕，不带起始位置，overlay 从头开始
                 self._press_pos = None
                 self.drag_started.emit(self.screen, None)
-                self.hide()
+                # 同上
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -146,26 +166,40 @@ class ScreenSelector(QWidget):
         # 可以在这里添加额外的视觉反馈
     
     def _on_drag_started(self, screen, start_pos):
-        """拖动开始时的处理 - 立即关闭并启动截图"""
-        # 立即关闭所有窗口，减少延迟
+        """拖动开始：先关掉所有选择器窗口再抓屏，避免把提示文字/蓝框拍进截图。"""
         for win in self.windows:
-            win.screen_selected.disconnect()
-            win.drag_started.disconnect()
+            try:
+                win.screen_selected.disconnect()
+            except TypeError:
+                pass
+            try:
+                win.drag_started.disconnect()
+            except TypeError:
+                pass
             win.close()
         self.windows.clear()
-        
+
         if screen is None:
-            # 取消操作
             self.screen_selected.emit(None)
-        else:
-            # 直接启动截图，减少信号传递
-            self.screen_selected.emit((screen, start_pos))
-        
+            self.close()
+            return
+
+        QApplication.processEvents()
+
+        clean_pixmap = None
+        try:
+            clean_pixmap = screen.grabWindow(0)
+            if clean_pixmap is not None and not clean_pixmap.isNull():
+                clean_pixmap.setDevicePixelRatio(1.0)
+        except Exception:
+            clean_pixmap = None
+
+        self.screen_selected.emit((screen, start_pos, clean_pixmap))
         self.close()
 
 
 class ScreenshotOverlay(QWidget):
-    def __init__(self, target_screen=None, start_pos=None):
+    def __init__(self, target_screen=None, start_pos=None, prefetched_pixmap=None):
         super().__init__()
         
         if target_screen is None:
@@ -182,7 +216,7 @@ class ScreenshotOverlay(QWidget):
         self._dimmed_background = None
         self.scale_x = 1.0
         self.scale_y = 1.0
-        self._capture_screenshot()
+        self._apply_screen_capture(prefetched_pixmap)
         
         # 使用缓存的快捷键配置
         self._hotkeys, self._hotkey_map = get_cached_hotkeys()
@@ -238,10 +272,13 @@ class ScreenshotOverlay(QWidget):
         self._temp_text_cursor_timer = QTimer(self)
         self._temp_text_cursor_timer.timeout.connect(self._toggle_temp_text_cursor)
         self._temp_text_font_size = 16
+        self._temp_text_caret = 0
+        self._temp_reedit_original: TextMark | None = None
         
         # AI 胶囊和提示菜单（懒加载）
         self.ai_capsule = None
         self.prompt_menu = None
+        self._ai_quick_buttons = []
         
         # 固定比例功能
         self._aspect_ratios = [
@@ -301,12 +338,6 @@ class ScreenshotOverlay(QWidget):
 
     def closeEvent(self, event):
         """关闭事件 - 确保资源正确释放"""
-        # 关闭颜色气泡
-        if self.toolbar and self.toolbar._color_bubble:
-            self.toolbar._color_bubble.hide()
-            self.toolbar._color_bubble.deleteLater()
-            self.toolbar._color_bubble = None
-        
         # 停止临时文本编辑定时器
         if hasattr(self, '_temp_text_cursor_timer') and self._temp_text_cursor_timer.isActive():
             self._temp_text_cursor_timer.stop()
@@ -324,6 +355,21 @@ class ScreenshotOverlay(QWidget):
             pass
         
         event.accept()
+
+    def _apply_screen_capture(self, prefetched_pixmap=None):
+        """使用预抓取或同步 grab；预抓取成功时可跳过遮罩首帧前的阻塞 grab。"""
+        if (
+            prefetched_pixmap is not None
+            and not prefetched_pixmap.isNull()
+            and prefetched_pixmap.width() > 0
+        ):
+            self.full_screen_pixmap = prefetched_pixmap
+            self.full_screen_pixmap.setDevicePixelRatio(1.0)
+            self.scale_x = self.full_screen_pixmap.width() / max(self.screen_geometry.width(), 1)
+            self.scale_y = self.full_screen_pixmap.height() / max(self.screen_geometry.height(), 1)
+            self._dimmed_background = None
+            return
+        self._capture_screenshot()
 
     def _capture_screenshot(self):
         """在窗口显示之前截取屏幕"""
@@ -398,6 +444,142 @@ class ScreenshotOverlay(QWidget):
             # 信号驱动位置同步（替代定时器轮询）
             self.ai_capsule.width_changed.connect(self._sync_positions)
         return self.ai_capsule
+
+    def _clear_ai_quick_buttons(self):
+        """清理侧边 AI 快捷按钮"""
+        for btn in self._ai_quick_buttons:
+            btn.hide()
+            btn.deleteLater()
+        self._ai_quick_buttons.clear()
+
+    def _ensure_ai_quick_buttons(self):
+        """按当前 prompts 生成侧边 AI 快捷按钮"""
+        if self._ai_quick_buttons:
+            return self._ai_quick_buttons
+
+        prompts = ScreenshotAICapsule._load_prompts()
+        for title, content, prompt_type in prompts:
+            btn = QPushButton(title, self)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(self._build_prompt_tooltip(content))
+            btn.setFixedHeight(28)
+            if prompt_type == "image":
+                border = "rgba(236, 72, 153, 0.95)"
+                border_hover = "rgba(219, 39, 119, 1.0)"
+            else:
+                border = "rgba(99, 102, 241, 0.95)"
+                border_hover = "rgba(79, 70, 229, 1.0)"
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255, 255, 255, 0.98);
+                    color: #1f2937;
+                    border: 2px solid {border};
+                    border-radius: 14px;
+                    padding: 0 10px;
+                    font-size: 12px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: rgba(255, 255, 255, 1.0);
+                    border: 2px solid {border_hover};
+                }}
+                QPushButton:pressed {{
+                    background: rgba(229, 231, 235, 1.0);
+                }}
+            """)
+            btn.clicked.connect(
+                lambda checked=False, c=content, t=prompt_type: self._do_ai_process(c, t)
+            )
+            btn.hide()
+            self._ai_quick_buttons.append(btn)
+
+        return self._ai_quick_buttons
+
+    @staticmethod
+    def _build_prompt_tooltip(content: str) -> str:
+        """构建短预览 tooltip，避免长 prompt 产生巨大悬浮窗。"""
+        if not content:
+            return ""
+        text = content.strip()
+        if not text:
+            return ""
+        max_lines = 3
+        max_chars = 120
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            lines = [text.replace("\n", " ").strip()]
+        preview_lines = lines[:max_lines]
+        preview = "\n".join(preview_lines)
+        if len(preview) > max_chars:
+            preview = preview[:max_chars].rstrip() + "..."
+        elif len(lines) > max_lines or len(text) > len(preview):
+            preview = preview.rstrip() + "..."
+        return preview
+
+    def _update_ai_quick_buttons_pos(self):
+        """将 AI 模版快捷按钮悬浮在选区侧边"""
+        if self.selection_rect.isNull():
+            self._hide_ai_quick_buttons()
+            return
+
+        buttons = self._ensure_ai_quick_buttons()
+        if not buttons:
+            return
+
+        r = self.selection_rect
+        screen_w = self.screen_geometry.width()
+        screen_h = self.screen_geometry.height()
+        gap = 8
+        side_margin = 10
+        y = r.top()
+        max_w = 0
+        total_h = 0
+
+        for i, btn in enumerate(buttons):
+            text_w = btn.fontMetrics().horizontalAdvance(btn.text())
+            btn_w = max(56, min(140, text_w + 22))
+            btn.setFixedWidth(btn_w)
+            max_w = max(max_w, btn_w)
+            total_h += btn.height() + (gap if i > 0 else 0)
+
+        y = max(side_margin, min(y, screen_h - total_h - side_margin))
+        right_x = r.right() + 12
+        left_x = r.left() - max_w - 12
+
+        if right_x + max_w <= screen_w - side_margin:
+            x = right_x
+        elif left_x >= side_margin:
+            x = left_x
+        else:
+            x = max(side_margin, min(right_x, screen_w - max_w - side_margin))
+
+        # 避让底部工具栏：小选区时快捷按钮可能与工具栏重叠
+        quick_rect = QRect(x, y, max_w, total_h)
+        toolbar = self.toolbar if (self.toolbar and self.toolbar.isVisible()) else None
+        if toolbar is not None:
+            toolbar_rect = toolbar.geometry().adjusted(-6, -6, 6, 6)
+            if quick_rect.intersects(toolbar_rect):
+                above_y = toolbar_rect.top() - total_h - 8
+                below_y = toolbar_rect.bottom() + 8
+                can_place_above = above_y >= side_margin
+                can_place_below = (below_y + total_h) <= (screen_h - side_margin)
+                if can_place_above:
+                    y = above_y
+                elif can_place_below:
+                    y = below_y
+                else:
+                    # 两侧都不足时，退化到当前屏幕可见区内最优位置
+                    y = max(side_margin, min(y, screen_h - total_h - side_margin))
+
+        cy = y
+        for btn in buttons:
+            btn.move(x, cy)
+            btn.show()
+            cy += btn.height() + gap
+
+    def _hide_ai_quick_buttons(self):
+        for btn in self._ai_quick_buttons:
+            btn.hide()
     
     def _ensure_prompt_menu(self):
         """懒加载提示菜单"""
@@ -414,6 +596,7 @@ class ScreenshotOverlay(QWidget):
             if self.ai_capsule:
                 self.ai_capsule.hide()
                 self.ai_capsule._dropdown.hide()
+            self._hide_ai_quick_buttons()
             return
         r = self.selection_rect
         screen_h = self.screen_geometry.height()
@@ -456,6 +639,7 @@ class ScreenshotOverlay(QWidget):
         # 定位 AI 胶囊（紧跟工具栏右侧）
         capsule.move(x + toolbar_w + 8, y)
         capsule.show()
+        self._update_ai_quick_buttons_pos()
     
     def _on_ai_clicked(self):
         """点击 AI 按钮 - 工具栏收缩，AI胶囊已经在展开"""
@@ -513,15 +697,28 @@ class ScreenshotOverlay(QWidget):
         if self._temp_text_editing:
             self.update()
     
+    def _release_keyboard_for_ime(self):
+        """释放键盘抢占，让系统输入法（Shift 切中英等）正常工作。与 AI 输入框逻辑一致。"""
+        self.releaseKeyboard()
+
+    def _restore_keyboard_grab_after_ime(self):
+        """结束 IME 相关输入后恢复抢占，防止按键穿透到底层；AI 输入框展开时保持释放。"""
+        if self.ai_capsule and self.ai_capsule.is_expanded() and self.ai_capsule.input_field.hasFocus():
+            return
+        self.grabKeyboard()
+
     def _start_temp_text_editing(self, pos: QPoint):
         """开始临时文本输入"""
         self._temp_text_editing = True
         self._temp_text_buffer = ""
         self._temp_text_preedit = ""
+        self._temp_text_caret = 0
+        self._temp_reedit_original = None
         self._temp_text_pos = pos
         self._temp_text_cursor_visible = True
         self._temp_text_cursor_timer.start(530)
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        self._release_keyboard_for_ime()
         self.setFocus()
         self.update()
     
@@ -541,11 +738,67 @@ class ScreenshotOverlay(QWidget):
         
         self._temp_text_buffer = ""
         self._temp_text_preedit = ""
+        self._temp_text_caret = 0
+        self._temp_reedit_original = None
+        self.update()
+        self._restore_keyboard_grab_after_ime()
+
+    def _abort_temp_text_editing(self):
+        """取消临时文本编辑（不提交新 TextMark）。"""
+        self._temp_text_cursor_timer.stop()
+        self._temp_text_editing = False
+        self._temp_text_buffer = ""
+        self._temp_text_preedit = ""
+        self._temp_text_caret = 0
+        self._restore_keyboard_grab_after_ime()
         self.update()
     
+    def _virtual_temp_edit_text(self) -> str:
+        return (
+            self._temp_text_buffer[: self._temp_text_caret]
+            + self._temp_text_preedit
+            + self._temp_text_buffer[self._temp_text_caret :]
+        )
+
+    def _temp_cursor_line_start(self, buf: str, caret: int) -> int:
+        before = buf[:caret]
+        i = before.rfind('\n')
+        return 0 if i < 0 else i + 1
+
+    def _temp_cursor_line_end(self, buf: str, caret: int) -> int:
+        j = buf.find('\n', caret)
+        return len(buf) if j < 0 else j
+
+    def _temp_caret_move_up(self):
+        buf = self._temp_text_buffer
+        c = self._temp_text_caret
+        line_start = self._temp_cursor_line_start(buf, c)
+        col = c - line_start
+        if line_start == 0:
+            self._temp_text_caret = 0
+            return
+        prev_region = buf[: line_start - 1]
+        prev_nl = prev_region.rfind('\n')
+        prev_line_start = 0 if prev_nl < 0 else prev_nl + 1
+        prev_line_len = line_start - 1 - prev_line_start
+        self._temp_text_caret = prev_line_start + min(col, prev_line_len)
+
+    def _temp_caret_move_down(self):
+        buf = self._temp_text_buffer
+        c = self._temp_text_caret
+        line_end = self._temp_cursor_line_end(buf, c)
+        if line_end >= len(buf):
+            return
+        line_start = self._temp_cursor_line_start(buf, c)
+        col = c - line_start
+        next_line_start = line_end + 1
+        next_nl = buf.find('\n', next_line_start)
+        next_line_end = len(buf) if next_nl < 0 else next_nl
+        next_len = next_line_end - next_line_start
+        self._temp_text_caret = next_line_start + min(col, next_len)
+
     def _draw_temp_editing_text(self, painter: QPainter):
-        """绘制正在编辑的临时文本"""
-        # 缓存字体和 metrics，避免每帧重建
+        """绘制正在编辑的临时文本 — 坐标与 TextMark.draw 一致"""
         if not hasattr(self, '_cached_temp_font') or self._cached_temp_font_size != self._temp_text_font_size:
             self._cached_temp_font = QFont(FONT_NAME, self._temp_text_font_size)
             self._cached_temp_metrics = QFontMetrics(self._cached_temp_font)
@@ -554,41 +807,49 @@ class ScreenshotOverlay(QWidget):
         metrics = self._cached_temp_metrics
         painter.setFont(font)
         painter.setPen(self._mark_color)
-        display_text = self._temp_text_buffer + self._temp_text_preedit
-        lines = display_text.split('\n')
+        virtual = self._virtual_temp_edit_text()
+        lines = virtual.split('\n')
         line_height = metrics.height()
-        
-        x, y = self._temp_text_pos.x(), self._temp_text_pos.y()
-        confirmed_lines = self._temp_text_buffer.split('\n')
-        
+        padding = 4
+
+        max_width = max((metrics.horizontalAdvance(line) for line in lines), default=0)
+        if max_width == 0:
+            max_width = metrics.horizontalAdvance("A")
+        total_height = line_height * len(lines) if lines else line_height
+        border_rect = QRect(
+            self._temp_text_pos.x(),
+            self._temp_text_pos.y(),
+            max_width + padding * 2,
+            total_height + padding * 2,
+        )
+        painter.save()
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(border_rect, 4, 4)
+        painter.restore()
+        painter.setPen(self._mark_color)
+
+        base_x = float(self._temp_text_pos.x() + padding)
+        base_y = float(self._temp_text_pos.y() + padding)
+
         for i, line in enumerate(lines):
-            text_y = y + (i + 1) * line_height
-            
-            if i == len(confirmed_lines) - 1 and self._temp_text_preedit:
-                confirmed_part = confirmed_lines[-1] if confirmed_lines else ""
-                painter.drawText(x, text_y, confirmed_part)
-                
-                preedit_x = x + metrics.horizontalAdvance(confirmed_part)
-                painter.drawText(preedit_x, text_y, self._temp_text_preedit)
-                preedit_width = metrics.horizontalAdvance(self._temp_text_preedit)
-                painter.drawLine(int(preedit_x), int(text_y + 2),
-                               int(preedit_x + preedit_width), int(text_y + 2))
-                
-                if self._temp_text_cursor_visible:
-                    cursor_x = preedit_x + preedit_width
-                    cursor_y1 = y + i * line_height + 2
-                    cursor_y2 = cursor_y1 + line_height
-                    painter.setPen(QPen(self._mark_color, 2))
-                    painter.drawLine(int(cursor_x), int(cursor_y1), int(cursor_x), int(cursor_y2))
-            else:
-                painter.drawText(x, text_y, line)
-                
-                if i == len(lines) - 1 and self._temp_text_cursor_visible and not self._temp_text_preedit:
-                    cursor_x = x + metrics.horizontalAdvance(line)
-                    cursor_y1 = y + i * line_height + 2
-                    cursor_y2 = cursor_y1 + line_height
-                    painter.setPen(QPen(self._mark_color, 2))
-                    painter.drawLine(int(cursor_x), int(cursor_y1), int(cursor_x), int(cursor_y2))
+            text_y = base_y + metrics.ascent() + i * line_height
+            painter.drawText(int(base_x), int(text_y), line)
+
+        if self._temp_text_preedit:
+            pe = self._temp_text_preedit
+            i0 = self._temp_text_caret
+            i1 = i0 + len(pe)
+            x0, y0, lh = _overlay_caret_geometry(virtual, i0, metrics, base_x, base_y)
+            x1, _, _ = _overlay_caret_geometry(virtual, i1, metrics, base_x, base_y)
+            text_y = y0 + metrics.ascent()
+            painter.drawLine(int(x0), int(text_y + 2), int(x1), int(text_y + 2))
+
+        cursor_index = self._temp_text_caret + len(self._temp_text_preedit)
+        if self._temp_text_cursor_visible:
+            cx, cy_top, lh = _overlay_caret_geometry(virtual, cursor_index, metrics, base_x, base_y)
+            painter.setPen(QPen(self._mark_color, 2))
+            painter.drawLine(int(cx), int(cy_top), int(cx), int(cy_top + lh))
     
     def _sync_positions(self):
         """信号驱动的位置同步 - 由 width_changed 触发，每帧精确跟踪"""
@@ -612,6 +873,7 @@ class ScreenshotOverlay(QWidget):
             self.toolbar.move(x, y)
         if self.ai_capsule:
             self.ai_capsule.move(x + toolbar_w + 8, y)
+        self._update_ai_quick_buttons_pos()
     
     def _on_ai_send(self, text: str, prompt_type: str = "text"):
         """AI 发送输入内容"""
@@ -765,21 +1027,13 @@ class ScreenshotOverlay(QWidget):
             return
         
         pos = self._get_int_pos(event)
-        
-        # 如果有标记工具选中且在选区内，开始标记
-        if self._mark_tool != 'none' and self.selection_rect.contains(pos):
-            self._is_marking = True
-            self._mark_start_pos = pos
-            self._last_mouse_pos = pos
-            
-            if self._mark_tool == 'freehand':
-                self._temp_freehand_points = [pos]
-            elif self._mark_tool == 'text':
-                # 开始即时渲染文本输入
-                self._start_temp_text_editing(pos)
-                self._is_marking = False
+
+        # AI 输入框展开时：仅允许点击工具按钮区触发收起
+        if self._handle_ai_expanded_click_gate(pos):
+            event.accept()
             return
         
+        # 选区锚点优先级最高：即使当前选中标记工具，也先响应调整选区
         for handle, rect in self.handles.items():
             if not rect.isNull() and rect.contains(pos):
                 self.is_resizing = True
@@ -789,6 +1043,42 @@ class ScreenshotOverlay(QWidget):
                     self._unlock_aspect_ratio()
                 self._hide_toolbar_and_capsule()
                 return
+        
+        # 标记工具：在选区内（且不在锚点上，锚点已上面处理）
+        if self._mark_tool != 'none' and self.selection_rect.contains(pos):
+            self._is_marking = True
+            self._mark_start_pos = pos
+            self._last_mouse_pos = pos
+            
+            if self._mark_tool == 'freehand':
+                self._temp_freehand_points = [pos]
+            elif self._mark_tool == 'text':
+                self._finish_temp_text_editing()
+                hit = None
+                for m in reversed(self._marks):
+                    if isinstance(m, TextMark) and m.contains(pos):
+                        hit = m
+                        break
+                if hit:
+                    self._marks.remove(hit)
+                    self._redo_stack.clear()
+                    self._temp_reedit_original = hit
+                    self._temp_text_buffer = hit.text
+                    self._temp_text_preedit = ""
+                    self._temp_text_caret = len(hit.text)
+                    self._temp_text_pos = hit.pos
+                    self._temp_text_font_size = hit.font_size
+                    self._temp_text_editing = True
+                    self._temp_text_cursor_visible = True
+                    self._temp_text_cursor_timer.start(530)
+                    self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+                    self._release_keyboard_for_ime()
+                    self.setFocus()
+                    self.update()
+                else:
+                    self._start_temp_text_editing(pos)
+                self._is_marking = False
+            return
         if self.selection_rect.contains(pos):
             self.is_moving = True
             self.drag_start_pos = pos
@@ -908,18 +1198,9 @@ class ScreenshotOverlay(QWidget):
     
     def _update_cursor_for_position(self, pos: QPoint):
         """根据鼠标位置更新光标样式"""
-        # 如果有标记工具选中，使用对应光标
-        if self._mark_tool == 'text':
-            self.setCursor(Qt.CursorShape.IBeamCursor)
-            return
-        elif self._mark_tool != 'none':
-            self.setCursor(Qt.CursorShape.CrossCursor)
-            return
-        
-        # 检查是否在锚点上
+        # 锚点优先：悬停在选区调整点上时始终显示调整光标（与是否选中标记工具无关）
         for handle, rect in self.handles.items():
             if not rect.isNull() and rect.contains(pos):
-                # 根据锚点位置设置对应的调整大小光标
                 if handle in ('top_left', 'bottom_right'):
                     self.setCursor(Qt.CursorShape.SizeFDiagCursor)
                 elif handle in ('top_right', 'bottom_left'):
@@ -929,6 +1210,13 @@ class ScreenshotOverlay(QWidget):
                 elif handle in ('left', 'right'):
                     self.setCursor(Qt.CursorShape.SizeHorCursor)
                 return
+        
+        if self._mark_tool == 'text':
+            self.setCursor(Qt.CursorShape.IBeamCursor)
+            return
+        if self._mark_tool != 'none':
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
         
         # 检查是否在选区内
         if self.selection_rect.contains(pos):
@@ -945,6 +1233,43 @@ class ScreenshotOverlay(QWidget):
         if self.ai_capsule:
             self.ai_capsule.hide()
             self.ai_capsule._dropdown.hide()
+        self._hide_ai_quick_buttons()
+
+    def _toolbar_buttons_rect(self) -> QRect:
+        """工具栏按钮容器在 overlay 坐标中的矩形。"""
+        if not self.toolbar or not self.toolbar.isVisible():
+            return QRect()
+        container = getattr(self.toolbar, "buttons_container", None)
+        if container is None or not container.isVisible():
+            return QRect()
+        top_left = container.mapTo(self, QPoint(0, 0))
+        return QRect(top_left, container.size())
+
+    def _handle_ai_expanded_click_gate(self, pos: QPoint) -> bool:
+        """AI 展开时点击门控。
+
+        返回 True 表示事件已处理（上层应直接 return）。
+        仅当点击工具按钮区时，才允许收起 AI 输入框。
+        """
+        if not self.ai_capsule or not self.ai_capsule.is_expanded():
+            return False
+
+        capsule_rect = self.ai_capsule.geometry().adjusted(-10, -8, 10, 8)
+        if capsule_rect.contains(pos):
+            return True
+
+        dropdown = getattr(self.ai_capsule, "_dropdown", None)
+        if dropdown is not None and dropdown.isVisible() and dropdown.geometry().contains(pos):
+            return True
+
+        toolbar_rect = self._toolbar_buttons_rect()
+        if not toolbar_rect.isNull() and toolbar_rect.contains(pos):
+            self.ai_capsule.collapse()
+            self.grabKeyboard()
+            return False
+
+        # 其它区域不再误收起，也不触发选区操作
+        return True
 
     # ── 固定比例：滚轮切换 ──────────────────────────────────
 
@@ -1120,6 +1445,8 @@ class ScreenshotOverlay(QWidget):
             self.update_toolbar_pos()
 
     def mouseDoubleClickEvent(self, event):
+        if self._temp_text_editing or self._mark_tool == 'text':
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self.selection_rect.isNull():
             if self.selection_rect.contains(self._get_int_pos(event)):
                 self.finish_screenshot()
@@ -1132,29 +1459,94 @@ class ScreenshotOverlay(QWidget):
             
             if key == Qt.Key.Key_Return:
                 if modifiers & Qt.KeyboardModifier.ControlModifier:
-                    self._temp_text_buffer += '\n'
+                    self._temp_text_buffer = (
+                        self._temp_text_buffer[: self._temp_text_caret]
+                        + '\n'
+                        + self._temp_text_buffer[self._temp_text_caret :]
+                    )
+                    self._temp_text_caret += 1
                     self.update()
                 else:
                     self._finish_temp_text_editing()
                 return
             
             elif key == Qt.Key.Key_Escape:
-                self._temp_text_buffer = ""
-                self._finish_temp_text_editing()
+                if self._temp_reedit_original is not None:
+                    self._marks.append(self._temp_reedit_original)
+                    self._temp_reedit_original = None
+                    self._abort_temp_text_editing()
+                else:
+                    self._temp_text_buffer = ""
+                    self._temp_text_caret = 0
+                    self._finish_temp_text_editing()
                 return
             
             elif key == Qt.Key.Key_Backspace:
-                if self._temp_text_buffer:
-                    self._temp_text_buffer = self._temp_text_buffer[:-1]
+                if self._temp_text_preedit:
+                    event.ignore()
+                    return
+                if self._temp_text_caret > 0:
+                    self._temp_text_buffer = (
+                        self._temp_text_buffer[: self._temp_text_caret - 1]
+                        + self._temp_text_buffer[self._temp_text_caret :]
+                    )
+                    self._temp_text_caret -= 1
                     self.update()
+                return
+
+            elif key == Qt.Key.Key_Delete:
+                if self._temp_text_preedit:
+                    event.ignore()
+                    return
+                if self._temp_text_caret < len(self._temp_text_buffer):
+                    self._temp_text_buffer = (
+                        self._temp_text_buffer[: self._temp_text_caret]
+                        + self._temp_text_buffer[self._temp_text_caret + 1 :]
+                    )
+                    self.update()
+                return
+
+            elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Home, Qt.Key.Key_End):
+                if self._temp_text_preedit:
+                    event.ignore()
+                    return
+                if key == Qt.Key.Key_Left:
+                    self._temp_text_caret = max(0, self._temp_text_caret - 1)
+                elif key == Qt.Key.Key_Right:
+                    self._temp_text_caret = min(len(self._temp_text_buffer), self._temp_text_caret + 1)
+                elif key == Qt.Key.Key_Up:
+                    self._temp_caret_move_up()
+                elif key == Qt.Key.Key_Down:
+                    self._temp_caret_move_down()
+                elif key == Qt.Key.Key_Home:
+                    self._temp_text_caret = self._temp_cursor_line_start(self._temp_text_buffer, self._temp_text_caret)
+                elif key == Qt.Key.Key_End:
+                    self._temp_text_caret = self._temp_cursor_line_end(self._temp_text_buffer, self._temp_text_caret)
+                self._temp_text_cursor_visible = True
+                self.update()
                 return
             
             else:
+                # 修饰键、无字符键交给系统/输入法（避免 Shift 切换中英被吞）
+                if key in (
+                    Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key_Alt,
+                    Qt.Key.Key_Meta, Qt.Key.Key_AltGr, Qt.Key.Key_CapsLock,
+                ):
+                    event.ignore()
+                    return
                 text = event.text()
                 if text and text.isprintable():
-                    self._temp_text_buffer += text
+                    self._temp_text_buffer = (
+                        self._temp_text_buffer[: self._temp_text_caret]
+                        + text
+                        + self._temp_text_buffer[self._temp_text_caret :]
+                    )
+                    self._temp_text_caret += len(text)
                     self._temp_text_cursor_visible = True
                     self.update()
+                    event.accept()
+                else:
+                    event.ignore()
                 return
         
         # 如果 AI 胶囊展开且输入框有焦点，让输入框处理键盘事件
@@ -1295,7 +1687,12 @@ class ScreenshotOverlay(QWidget):
             self._temp_text_preedit = event.preeditString()
             commit_text = event.commitString()
             if commit_text:
-                self._temp_text_buffer += commit_text
+                self._temp_text_buffer = (
+                    self._temp_text_buffer[: self._temp_text_caret]
+                    + commit_text
+                    + self._temp_text_buffer[self._temp_text_caret :]
+                )
+                self._temp_text_caret += len(commit_text)
                 self._temp_text_preedit = ""
             self._temp_text_cursor_visible = True
             self.update()
@@ -1315,17 +1712,13 @@ class ScreenshotOverlay(QWidget):
                     self._cached_temp_metrics = QFontMetrics(self._cached_temp_font)
                     self._cached_temp_font_size = self._temp_text_font_size
                 metrics = self._cached_temp_metrics
-                lines = self._temp_text_buffer.split('\n')
-                line_height = metrics.height()
-                
-                x = self._temp_text_pos.x()
-                y = self._temp_text_pos.y()
-                if lines:
-                    last_line = lines[-1]
-                    x += metrics.horizontalAdvance(last_line)
-                    y += (len(lines) - 1) * line_height
-                
-                return QRect(x, y, 2, line_height)
+                virtual = self._virtual_temp_edit_text()
+                idx = self._temp_text_caret + len(self._temp_text_preedit)
+                padding = 4
+                base_x = float(self._temp_text_pos.x() + padding)
+                base_y = float(self._temp_text_pos.y() + padding)
+                cx, cy_top, lh = _overlay_caret_geometry(virtual, idx, metrics, base_x, base_y)
+                return QRect(int(cx), int(cy_top), 2, int(lh))
         return super().inputMethodQuery(query)
     
     def _toggle_mark_tool(self, tool: str):
@@ -1357,8 +1750,11 @@ class ScreenshotOverlay(QWidget):
             self._marks.append(mark)
             self._temp_text_buffer = ""
             self._temp_text_preedit = ""
+            self._temp_text_caret = 0
+            self._temp_reedit_original = None
             self._temp_text_editing = False
             self._temp_text_cursor_timer.stop()
+            self._restore_keyboard_grab_after_ime()
         
         base_pixmap = self.full_screen_pixmap.copy(self._get_scaled_source_rect())
         
@@ -1521,7 +1917,10 @@ class ScreenshotOverlay(QWidget):
         self.close()
 
     def _open_prompt_editor(self):
-        self.prompt_settings_window = PromptSettingsWindow(stay_on_top=True)
+        ScreenshotAICapsule.invalidate_prompts_cache()
+        self._clear_ai_quick_buttons()
+        self.prompt_settings_window = SettingsDialog(self)
+        self.prompt_settings_window.show_tab('prompt')
         self.prompt_settings_window.show()
     
     def _do_ai_process(self, prompt: str = None, prompt_type: str = "text"):
@@ -1709,3 +2108,40 @@ class ScreenshotOverlay(QWidget):
         
         editor.destroyed.connect(on_editor_closed)
         self.close()
+
+    def open_in_photoshop(self):
+        """将标注后的截图临时保存为 PNG，并用 Photoshop 打开"""
+        if self.selection_rect.isNull():
+            return
+
+        try:
+            pixmap = self._get_marked_pixmap()
+            if pixmap is None or pixmap.isNull():
+                return
+
+            pixmap.setDevicePixelRatio(self.scale_x)
+
+            from config import ps_config
+            ps_exe = ps_config.get_ps_path()
+
+            if not ps_exe or not os.path.exists(ps_exe):
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "选择 Photoshop.exe",
+                    r"C:\Program Files\Adobe",
+                    "Photoshop.exe (*.exe);;所有文件 (*.*)",
+                )
+                if not file_path or not os.path.exists(file_path):
+                    return
+                ps_config.set_ps_path(file_path)
+                ps_exe = file_path
+
+            temp_dir = os.path.join(os.getenv("TEMP", "."), "Artco")
+            os.makedirs(temp_dir, exist_ok=True)
+            file_path = os.path.join(temp_dir, f"artco_ps_{uuid.uuid4().hex}.png")
+            pixmap.save(file_path, "PNG")
+
+            subprocess.Popen([ps_exe, file_path])
+            self.close()
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"无法启动 Photoshop：\n{e}")
