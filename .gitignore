@@ -64,6 +64,11 @@ shell_ext/obj/
 screenshot/__pycache__/
 ui/__pycache__/
 
+# Update temp files
+.update_skip
+.update_lastcheck
+.artco_update_failed
+
 # CodeBuddy IDE
 .codebuddy/
 .env

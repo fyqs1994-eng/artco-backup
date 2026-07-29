@@ -35,6 +35,18 @@ goto :eof
 :build_full
 echo 正在构建正式版 (Artco)...
 echo.
+
+echo [0/2] 构建更新替换程序 (ArtcoUpdater)...
+pyinstaller ArtcoUpdater.spec --noconfirm
+if errorlevel 1 (
+    echo.
+    echo [警告] ArtcoUpdater 构建失败，继续构建主程序（自动更新功能将不可用）
+) else (
+    echo       ArtcoUpdater.exe 已生成
+)
+echo.
+
+echo [1/2] 构建正式版主程序...
 pyinstaller Artco.spec --noconfirm
 if errorlevel 1 (
     echo.

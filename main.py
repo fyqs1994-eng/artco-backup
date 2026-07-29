@@ -6,6 +6,7 @@ Artco - AI 截图工具
 import sys
 import os
 import base64
+import threading
 
 # 设置 Qt API 为 PySide6（必须在导入 qtawesome 之前）
 os.environ['QT_API'] = 'pyside6'
@@ -24,11 +25,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap
 
 
+from version import APP_VERSION, APP_NAME
 from config import ai_config, get_bundle_dir
 from ui.theme import MENU_STYLE
 
 from database import init_database, add_record
 from utils import hotkey_manager, convert_hotkey_format
+import updater
 from ui import (
     AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, WorkbenchWindow,
     ClipboardHistoryManager, ClipboardFloatPanel
@@ -1175,12 +1178,20 @@ class CapsuleWidget(QWidget):
         
         self.tray_menu.addSeparator()
         
+        update_action = self.tray_menu.addAction(qta.icon('mdi6.cloud-download-outline', color='#555'), "  检查更新")
+        update_action.triggered.connect(self._check_update_manual)
+        
+        self.tray_menu.addSeparator()
+        
         quit_action = self.tray_menu.addAction(qta.icon('mdi6.power', color='#e53935'), "  退出")
         quit_action.triggered.connect(QApplication.quit)
         
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+        
+        # 启动后延迟 8 秒静默检查更新
+        QTimer.singleShot(8000, self._check_update_silent)
     
     def _toggle_capsule_visibility(self):
         """切换胶囊显示/强制隐藏状态"""
@@ -1257,6 +1268,132 @@ class CapsuleWidget(QWidget):
         self.show_action.setIcon(qta.icon('mdi6.eye-off-outline', color='#555'))
         self.reveal(animated=True)
         self.activateWindow()
+
+    # ══════════════════════════════════════════════════════
+    #  自动更新
+    # ══════════════════════════════════════════════════════
+
+    def _check_update_silent(self):
+        """启动后静默检查更新（非侵入式托盘通知）"""
+        if not updater.should_check_silently():
+            return
+        threading.Thread(target=self._do_silent_check, daemon=True).start()
+
+    def _do_silent_check(self):
+        """后台线程：静默检查"""
+        has_update, info = updater.check_for_update()
+        updater._save_check_time()
+        if has_update:
+            version = info.get("version", "?")
+            changelog = info.get("changelog", "")
+            # 通过信号在主线程显示托盘通知
+            QTimer.singleShot(0, lambda: self._show_update_notification(version, changelog, info))
+
+    def _show_update_notification(self, version: str, changelog: str, info: dict):
+        """在系统托盘显示更新通知（非侵入式）"""
+        title = f"Artco {version} 可用"
+        msg = changelog[:200] if changelog else "点击检查更新"
+        self.tray_icon.showMessage(
+            title, msg,
+            QSystemTrayIcon.MessageIcon.Information,
+            5000
+        )
+
+    def _check_update_manual(self):
+        """手动检查更新（从托盘菜单或设置页触发）"""
+        # 显示检查中提示
+        self.tray_icon.showMessage(
+            "Artco", "正在检查更新…",
+            QSystemTrayIcon.MessageIcon.NoIcon, 2000
+        )
+        threading.Thread(target=self._do_manual_check, daemon=True).start()
+
+    def _do_manual_check(self):
+        """后台线程：手动检查"""
+        has_update, info = updater.check_for_update()
+        updater._save_check_time()
+        if has_update:
+            version = info.get("version", "?")
+            changelog = info.get("changelog", "")
+            QTimer.singleShot(0, lambda: self._show_update_dialog(version, changelog, info))
+        else:
+            QTimer.singleShot(0, lambda: self.tray_icon.showMessage(
+                "Artco", "已是最新版本 ✓",
+                QSystemTrayIcon.MessageIcon.Information, 2000
+            ))
+
+    def _show_update_dialog(self, version: str, changelog: str, info: dict):
+        """显示更新对话框，让用户选择立即更新/稍后/跳过"""
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from PySide6.QtCore import QThread, Signal
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle(f"发现新版本 v{version}")
+        msg.setText(f"<h3>Artco v{version} 已发布</h3>")
+        changes = changelog if changelog else "暂无更新说明"
+        msg.setInformativeText(f"<b>更新内容：</b><br>{changes}<br><br>当前版本：v{APP_VERSION}")
+        btn_update = msg.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
+        btn_later = msg.addButton("稍后提醒", QMessageBox.ButtonRole.RejectRole)
+        btn_skip = msg.addButton("跳过此版本", QMessageBox.ButtonRole.DestructiveRole)
+        msg.setDefaultButton(btn_update)
+        msg.exec()
+
+        if msg.clickedButton() == btn_update:
+            self._start_download_update(info)
+        elif msg.clickedButton() == btn_skip:
+            updater.skip_version(info.get("version", ""))
+
+    def _start_download_update(self, info: dict):
+        """开始下载更新，显示进度条"""
+        from PySide6.QtWidgets import QProgressDialog
+
+        self._update_progress = QProgressDialog("正在下载更新…", "取消", 0, 100, self)
+        self._update_progress.setWindowTitle("Artco 更新")
+        self._update_progress.setMinimumWidth(400)
+        self._update_progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._update_progress.setAutoClose(False)
+        self._update_progress.canceled.connect(self._cancel_update_download)
+        self._update_info = info
+        self._update_cancelled = False
+        self._update_progress.show()
+
+        threading.Thread(target=self._download_thread, daemon=True).start()
+
+    def _download_thread(self):
+        """后台下载线程"""
+        try:
+            new_path = updater.download_update(
+                self._update_info,
+                progress_callback=self._on_download_progress
+            )
+            if self._update_cancelled:
+                return
+            QTimer.singleShot(0, lambda: self._on_download_complete(new_path))
+        except Exception as e:
+            QTimer.singleShot(0, lambda: self._on_download_error(str(e)))
+
+    def _on_download_progress(self, ratio: float):
+        """下载进度回调（在下载线程中调用，需通过 QTimer 切回主线程）"""
+        percent = int(ratio * 100)
+        QTimer.singleShot(0, lambda: self._update_progress.setValue(percent))
+
+    def _on_download_complete(self, new_path: str):
+        """下载完成，启动 Updater 替换"""
+        self._update_progress.setValue(100)
+        self._update_progress.setLabelText("下载完成，正在应用更新…")
+        QMessageBox.information(self, "更新", "下载完成，程序将重启以完成更新。")
+        updater.apply_update(new_path)
+
+    def _on_download_error(self, error_msg: str):
+        """下载失败"""
+        if hasattr(self, '_update_progress'):
+            self._update_progress.close()
+        QMessageBox.warning(self, "更新失败", f"下载更新失败：\n{error_msg}")
+
+    def _cancel_update_download(self):
+        """用户取消下载"""
+        self._update_cancelled = True
 
     
     def _on_tray_activated(self, reason):

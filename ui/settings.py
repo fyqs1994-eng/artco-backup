@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QScrollArea, QFrame,
     QComboBox, QMenu, QStackedWidget, QToolButton,
     QListWidget, QListWidgetItem, QSizePolicy,
+    QProgressDialog,
 )
 from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer
 from PySide6.QtGui import QKeySequence
@@ -615,6 +616,31 @@ class SettingsDialog(QDialog):
         self.thumbnail_size_combo.setFixedWidth(140)
         lay.addWidget(self.thumbnail_size_combo)
 
+        lay.addSpacing(_BLOCK_GAP)
+
+        # section: 关于 / 更新
+        lay.addWidget(self._section("关于"))
+        lay.addSpacing(_SEC_GAP)
+
+        from version import APP_VERSION
+        version_label = QLabel(f"Artco v{APP_VERSION}")
+        version_label.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:14px; font-weight:500;")
+        lay.addWidget(version_label)
+        lay.addSpacing(8)
+
+        from qfluentwidgets import PushButton as QFPushButton
+        self.btn_check_update = QFPushButton("检查更新")
+        self.btn_check_update.setIcon(qta.icon('mdi6.cloud-download-outline', color=ACCENT_PRIMARY))
+        self.btn_check_update.setFixedHeight(_ROW_H)
+        self.btn_check_update.setFixedWidth(120)
+        self.btn_check_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_update.clicked.connect(self._check_update_from_settings)
+        lay.addWidget(self.btn_check_update)
+        lay.addSpacing(4)
+        tip3 = self._tip("检查是否有新版本可用")
+        tip3.setContentsMargins(24, 0, 0, 0)
+        lay.addWidget(tip3)
+
         lay.addStretch()
         return page
 
@@ -1208,6 +1234,93 @@ class SettingsDialog(QDialog):
         for (cat, act), edit in self._hotkey_edits.items():
             dh = hotkey_manager.DEFAULT_SCREENSHOT_HOTKEYS.get(cat, {}).get(act, '')
             edit.setKeySequence(QKeySequence(dh))
+
+    # ══════════════════════════════════════════════════════
+    #  自动更新
+    # ══════════════════════════════════════════════════════
+
+    def _check_update_from_settings(self):
+        """从设置页检查更新"""
+        import threading
+        import updater as updater_mod
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("检查中…")
+
+        def do_check():
+            has_update, info = updater_mod.check_for_update()
+            updater_mod._save_check_time()
+            QTimer.singleShot(0, lambda: self._on_check_result(has_update, info))
+
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def _on_check_result(self, has_update: bool, info):
+        """检查结果回调"""
+        self.btn_check_update.setEnabled(True)
+        self.btn_check_update.setText("检查更新")
+
+        if not has_update:
+            QMessageBox.information(self, "检查更新", "已是最新版本 ✓")
+            return
+
+        version = info.get("version", "?")
+        changelog = info.get("changelog", "")
+
+        from version import APP_VERSION
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle(f"发现新版本 v{version}")
+        msg.setText(f"<h3>Artco v{version} 已发布</h3>")
+        changes = changelog if changelog else "暂无更新说明"
+        msg.setInformativeText(f"<b>更新内容：</b><br>{changes}<br><br>当前版本：v{APP_VERSION}")
+        btn_update = msg.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("稍后提醒", QMessageBox.ButtonRole.RejectRole)
+        msg.addButton("跳过此版本", QMessageBox.ButtonRole.DestructiveRole)
+        msg.setDefaultButton(btn_update)
+        msg.exec()
+
+        if msg.clickedButton() == btn_update:
+            self._start_download_from_settings(info)
+
+    def _start_download_from_settings(self, info):
+        """从设置页开始下载更新"""
+        import threading
+        import updater as updater_mod
+
+        self._update_progress = QProgressDialog("正在下载更新…", "取消", 0, 100, self)
+        self._update_progress.setWindowTitle("Artco 更新")
+        self._update_progress.setMinimumWidth(400)
+        self._update_progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._update_progress.setAutoClose(False)
+        self._update_cancelled = False
+        self._update_info = info
+        self._update_progress.canceled.connect(lambda: setattr(self, '_update_cancelled', True))
+        self._update_progress.show()
+
+        def download_thread():
+            try:
+                new_path = updater_mod.download_update(
+                    info,
+                    progress_callback=lambda r: QTimer.singleShot(0, lambda: self._update_progress.setValue(int(r * 100)))
+                )
+                if self._update_cancelled:
+                    return
+                QTimer.singleShot(0, lambda: self._on_download_done(new_path))
+            except Exception as e:
+                QTimer.singleShot(0, lambda: self._on_download_fail(str(e)))
+
+        threading.Thread(target=download_thread, daemon=True).start()
+
+    def _on_download_done(self, new_path):
+        self._update_progress.setValue(100)
+        self._update_progress.setLabelText("下载完成，正在应用更新…")
+        QMessageBox.information(self, "更新", "下载完成，程序将重启以完成更新。")
+        import updater as updater_mod
+        updater_mod.apply_update(new_path)
+
+    def _on_download_fail(self, err):
+        if hasattr(self, '_update_progress'):
+            self._update_progress.close()
+        QMessageBox.warning(self, "更新失败", f"下载失败：\n{err}")
 
     # ══════════════════════════════════════════════════════
     #  Webhook（保留接口）

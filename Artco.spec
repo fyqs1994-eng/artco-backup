@@ -17,6 +17,8 @@ datas = [
     ('ui/resources', 'ui/resources'),
     # 默认配置文件模板（首次运行时复制到 exe 同目录）
     ('ai_config_empty.json', '.'),
+    # 内嵌 ArtcoUpdater.exe（自动更新用）
+    ('dist/ArtcoUpdater.exe', '.'),
 ]
 
 # 确保所有 .py 模块都被收集
@@ -43,6 +45,8 @@ hiddenimports = [
     'pynput.mouse',
     'psd_tools',
     'dotenv',
+    # 更新模块依赖
+    'requests',
     # 项目内部模块
     'config',
     'database',
@@ -71,6 +75,9 @@ hiddenimports = [
     'ui.sidebar',
     'ui.theme',
     'ui.workbench',
+    # 版本和更新模块
+    'version',
+    'updater',
 ]
 
 a = Analysis(
