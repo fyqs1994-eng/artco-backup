@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QScrollArea, QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, QSize, QPoint, QBuffer, QIODevice, QTimer, QRect
-from PySide6.QtGui import QColor, QPainter, QPixmap, QGuiApplication, QKeyEvent, QCursor, QFont, QFontMetrics
+from PySide6.QtGui import QColor, QPainter, QPixmap, QGuiApplication, QKeyEvent, QCursor, QFont, QFontMetrics, QPen
 
 from database import add_record
 from ui import PromptSelectMenu, SettingsDialog
@@ -27,6 +27,7 @@ class EditorWindow(QMainWindow):
         self.pixmap = pixmap
         self._auto_fitted = False
         self._copied = False  # 标记是否有过复制操作
+        self._marks_count_at_copy = 0  # 复制时的标记数量，用于检测复制后是否有新增
         self._annotation_panel_visible = False
         self._annotation_expand_delta = 0
         self._annotation_expanded_by_us = False
@@ -289,17 +290,24 @@ class EditorWindow(QMainWindow):
         if not all_numbers:
             return base_image
         
-        panel_width = 240
+        panel_width = 260
         padding = 16
         title_height = 40
-        item_spacing = 12
         circle_size = 22
         text_left_margin = 8
+        # 仅作用于导出图：条目卡片内边距与间距（不动编辑器侧栏 UI）
+        card_h_pad = 12
+        card_w_pad = 12
+        card_gap = 14
+        card_radius = 8
+        img_below_text_gap = 10
+        
+        inner_list_w = panel_width - padding * 2
+        text_width = inner_list_w - 2 * card_w_pad - circle_size - text_left_margin
         
         item_font = QFont(FONT_NAME, 12)
         item_fm = QFontMetrics(item_font)
         
-        text_width = panel_width - padding * 2 - circle_size - text_left_margin
         item_text_heights: dict[int, int] = {}
         item_total_heights: dict[int, int] = {}
         item_scaled_images: dict[int, QPixmap] = {}
@@ -324,13 +332,14 @@ class EditorWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation
                 )
                 item_scaled_images[number] = scaled
-                img_extra = scaled.height() + 8
+                img_extra = img_below_text_gap + scaled.height()
             else:
                 item_scaled_images[number] = QPixmap()
             
             item_total_heights[number] = text_block_h + img_extra
         
-        total_items_height = sum(item_total_heights.values()) + item_spacing * (len(all_numbers) - 1)
+        card_outer_heights = [item_total_heights[n] + 2 * card_h_pad for n in all_numbers]
+        total_items_height = sum(card_outer_heights) + card_gap * max(0, len(all_numbers) - 1)
         panel_content_height = title_height + padding + total_items_height + padding
         panel_height = max(base_image.height(), panel_content_height)
         
@@ -359,15 +368,29 @@ class EditorWindow(QMainWindow):
         painter.drawLine(panel_x + padding, separator_y, panel_x + panel_width - padding, separator_y)
         
         y_offset = title_height + padding
+        card_border_light = QColor(235, 238, 243)
+        card_fill = QColor(255, 255, 255)
         
         for number in all_numbers:
             text_block_h = item_text_heights[number]
-            total_h = item_total_heights[number]
+            card_h = item_total_heights[number] + 2 * card_h_pad
             raw = (annotations.get(number) or "").strip()
             draw_text = raw if raw else " "
             
-            circle_x = panel_x + padding
-            circle_y = y_offset
+            card_x = panel_x + padding
+            card_w = inner_list_w
+            card_rect = QRect(card_x, y_offset, card_w, card_h)
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 10))
+            painter.drawRoundedRect(card_rect.adjusted(0, 1, 0, 1), card_radius, card_radius)
+            
+            painter.setBrush(card_fill)
+            painter.setPen(QPen(card_border_light, 1))
+            painter.drawRoundedRect(card_rect, card_radius, card_radius)
+            
+            circle_x = card_x + card_w_pad
+            circle_y = y_offset + card_h_pad
             painter.setBrush(QColor(255, 50, 50))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawEllipse(circle_x, circle_y, circle_size, circle_size)
@@ -382,16 +405,18 @@ class EditorWindow(QMainWindow):
             painter.setPen(QColor(51, 51, 51))
             painter.setFont(item_font)
             text_x = circle_x + circle_size + text_left_margin
-            text_rect = QRect(text_x, y_offset, text_width, text_block_h)
+            text_rect = QRect(text_x, circle_y, text_width, text_block_h)
             painter.drawText(text_rect,
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
                            draw_text)
             
             scaled = item_scaled_images.get(number)
             if scaled is not None and not scaled.isNull():
-                painter.drawPixmap(text_x, y_offset + text_block_h, scaled)
+                painter.drawPixmap(text_x, circle_y + text_block_h + img_below_text_gap, scaled)
             
-            y_offset += total_h + item_spacing
+            y_offset += card_h
+            if number != all_numbers[-1]:
+                y_offset += card_gap
         
         painter.end()
         return result
@@ -408,6 +433,7 @@ class EditorWindow(QMainWindow):
         final_pixmap = self._render_final_image_with_annotations()
         QGuiApplication.clipboard().setPixmap(final_pixmap)
         self._copied = True  # 标记已复制
+        self._marks_count_at_copy = len(self.canvas.marks)  # 记录复制时的标记数
         self.setWindowTitle("Artco 编辑器 - 已复制到剪贴板！")
         # 使用 weakref 避免窗口已删除后回调报错
         self._title_timer = QTimer()
@@ -506,8 +532,20 @@ class EditorWindow(QMainWindow):
         self.close()
     
     def closeEvent(self, event):
-        # 如果已经复制到剪贴板，或者没有标注，则不弹出确认
-        if self.canvas.marks and not getattr(self, '_copied', False):
+        # 判断是否需要弹出确认对话框
+        need_confirm = False
+        if self.canvas.marks:
+            if getattr(self, '_copied', False):
+                # 已复制：只有标记数量增加时才需要确认
+                current_count = len(self.canvas.marks)
+                copied_count = getattr(self, '_marks_count_at_copy', 0)
+                if current_count > copied_count:
+                    need_confirm = True
+            else:
+                # 未复制：有标记就需要确认
+                need_confirm = True
+        
+        if need_confirm:
             reply = QMessageBox.question(
                 self, "确认退出",
                 "您的标注尚未保存，确定要退出吗？",

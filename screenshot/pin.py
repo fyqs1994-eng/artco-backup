@@ -4,7 +4,7 @@
 
 from PySide6.QtWidgets import QWidget, QMenu, QFileDialog, QApplication
 from PySide6.QtCore import Qt, QRect, QPoint, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTransform
 import qtawesome as qta
 
 from config import ps_config
@@ -417,6 +417,22 @@ class PinWindow(QWidget):
         edit_action = menu.addAction(qta.icon('mdi6.pencil-outline', color='#555'), "编辑")
         edit_action.triggered.connect(self._request_edit)
         
+        transform_menu = menu.addMenu(qta.icon('mdi6.axis-arrow', color='#555'), "图像变换")
+        transform_menu.setStyleSheet(menu.styleSheet())
+        transform_menu.addAction(qta.icon('mdi6.flip-horizontal', color='#555'), "水平翻转").triggered.connect(
+            self._flip_horizontal
+        )
+        transform_menu.addAction(qta.icon('mdi6.flip-vertical', color='#555'), "垂直翻转").triggered.connect(
+            self._flip_vertical
+        )
+        transform_menu.addSeparator()
+        transform_menu.addAction(qta.icon('mdi6.rotate-left', color='#555'), "向左旋转 90°").triggered.connect(
+            self._rotate_left_90
+        )
+        transform_menu.addAction(qta.icon('mdi6.rotate-right', color='#555'), "向右旋转 90°").triggered.connect(
+            self._rotate_right_90
+        )
+        
         # 缩略图 & 还原
         menu.addSeparator()
         if not self._thumbnail_mode:
@@ -440,6 +456,40 @@ class PinWindow(QWidget):
         close_action.triggered.connect(self.close)
         
         menu.exec(event.globalPos())
+    
+    def _apply_pixmap_transform(self, transform: QTransform):
+        """对当前贴图 pixmap（及缩略图裁剪）应用几何变换，保持窗口中心不动。"""
+        center = self.geometry().center()
+        mode = Qt.TransformationMode.SmoothTransformation
+        new_orig = self._original_pixmap.transformed(transform, mode)
+        if new_orig.isNull():
+            return
+        new_orig.setDevicePixelRatio(self._device_pixel_ratio)
+        self._original_pixmap = new_orig
+        if self._cropped_pixmap is not None:
+            c = self._cropped_pixmap.transformed(transform, mode)
+            if not c.isNull():
+                c.setDevicePixelRatio(self._device_pixel_ratio)
+                self._cropped_pixmap = c
+        self._base_width = int(new_orig.width() / self._device_pixel_ratio)
+        self._base_height = int(new_orig.height() / self._device_pixel_ratio)
+        self._update_size()
+        new_geo = self.geometry()
+        new_geo.moveCenter(center)
+        self.move(new_geo.topLeft())
+    
+    def _flip_horizontal(self):
+        self._apply_pixmap_transform(QTransform().scale(-1, 1))
+    
+    def _flip_vertical(self):
+        self._apply_pixmap_transform(QTransform().scale(1, -1))
+    
+    def _rotate_left_90(self):
+        # 与图片查看器「逆时针」一致：rotate(-90)
+        self._apply_pixmap_transform(QTransform().rotate(-90))
+    
+    def _rotate_right_90(self):
+        self._apply_pixmap_transform(QTransform().rotate(90))
     
     def _set_opacity(self, opacity: float):
         """设置透明度"""

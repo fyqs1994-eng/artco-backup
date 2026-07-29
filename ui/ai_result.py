@@ -875,7 +875,8 @@ class AIResultBubble(QWidget):
         self.text_edit.hide()
         self.chat_scroll.hide()
         self.image_label.show()
-        self.btn_copy.hide()
+        self.btn_copy.show()
+        self.btn_copy.setText(" 复制图片")
         self.btn_pin.show()
         self.input_container.show()
         self.show()
@@ -893,14 +894,21 @@ class AIResultBubble(QWidget):
         self.show()
     
     def _copy_content(self):
-        QGuiApplication.clipboard().setText(self.full_text)
+        """复制内容到剪贴板 — 图片模式复制图片，文本模式复制文本"""
+        if self._current_pixmap and not self._current_pixmap.isNull() and self._is_ai_generated:
+            QGuiApplication.clipboard().setPixmap(self._current_pixmap)
+        else:
+            QGuiApplication.clipboard().setText(self.full_text)
         self.btn_copy.setIcon(qta.icon('mdi6.check', color='#4caf50'))
         self.btn_copy.setText(" 已复制")
         QTimer.singleShot(2000, self._reset_copy_btn)
     
     def _reset_copy_btn(self):
         self.btn_copy.setIcon(qta.icon('mdi6.content-copy', color='#555'))
-        self.btn_copy.setText(" 复制内容")
+        if self._current_pixmap and not self._current_pixmap.isNull() and self._is_ai_generated:
+            self.btn_copy.setText(" 复制图片")
+        else:
+            self.btn_copy.setText(" 复制内容")
     
     def _pin_image(self):
         """贴图按钮点击"""

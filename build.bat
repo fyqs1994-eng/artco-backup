@@ -4,6 +4,9 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
+:: PyInstaller 的 qtpy hook 会默认选 PyQt5，与本项目的 PySide6 冲突
+set "QT_API=pyside6"
+
 echo ============================================
 echo   Artco 构建工具
 echo ============================================

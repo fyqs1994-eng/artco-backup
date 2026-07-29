@@ -200,6 +200,7 @@ class PromptManagementPanel(QWidget):
     def _add_prompt(self):
         new_id = add_prompt("新建 Prompt", "请输入 Prompt 内容...", prompt_type="text")
         self.load_prompts()
+        self._notify_prompts_changed()
         for i in range(self.prompt_list.count()):
             item = self.prompt_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == new_id:
@@ -218,6 +219,7 @@ class PromptManagementPanel(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             delete_prompt(self.current_prompt_id)
             self.load_prompts()
+            self._notify_prompts_changed()
 
     def _save_prompt(self):
         if not self.current_prompt_id:
@@ -236,6 +238,7 @@ class PromptManagementPanel(QWidget):
         update_prompt(self.current_prompt_id, title, content, is_default, prompt_type)
         current_row = self.prompt_list.currentRow()
         self.load_prompts()
+        self._notify_prompts_changed()
         if current_row < self.prompt_list.count():
             self.prompt_list.setCurrentRow(current_row)
         self.btn_save.setIcon(qta.icon('mdi6.check', color='white'))
@@ -245,6 +248,14 @@ class PromptManagementPanel(QWidget):
     def _reset_save_btn(self):
         self.btn_save.setIcon(qta.icon('mdi6.content-save', color='white'))
         self.btn_save.setText("保存修改")
+
+    def _notify_prompts_changed(self):
+        """通知所有活跃的 ScreenshotAICapsule 实例刷新 prompts 缓存和 UI"""
+        try:
+            from screenshot.toolbar import ScreenshotAICapsule
+            ScreenshotAICapsule.refresh_all_instances()
+        except Exception:
+            pass
 
     # ── QSS ───────────────────────────────────────────────
 

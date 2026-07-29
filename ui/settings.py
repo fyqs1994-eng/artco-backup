@@ -483,8 +483,8 @@ class SettingsDialog(QDialog):
 
         self._prompt_title.textChanged.connect(self._prompt_edit_changed)
         self._prompt_content.textChanged.connect(self._prompt_edit_changed)
-        self._prompt_type_text.toggled.connect(self._prompt_edit_changed)
-        self._prompt_type_image.toggled.connect(self._prompt_edit_changed)
+        self._prompt_type_text.toggled.connect(self._on_prompt_type_toggled)
+        self._prompt_type_image.toggled.connect(self._on_prompt_type_toggled)
 
         h.addWidget(right_body, 1)
 
@@ -811,65 +811,96 @@ class SettingsDialog(QDialog):
     #  Prompt 数据操作
     # ══════════════════════════════════════════════════════
 
-    def _load_prompts(self):
+    def _load_prompts(self, select_id: str | None = None, refresh_form: bool = True):
         from PySide6.QtWidgets import QCheckBox
-        self._prompt_list.clear()
-        self._prompt_data = get_all_prompts()
-        self._prompt_default_cbs = []
+        # clear() 会把当前行置为 -1；若不在此前 blockSignals，会发出 currentRowChanged(-1)，
+        # 进而 _on_prompt_selected 清空表单并丢掉 _prompt_current_id（编辑中新模板会被打断）。
+        row = -1
+        self._prompt_list.blockSignals(True)
+        try:
+            self._prompt_list.clear()
+            self._prompt_data = get_all_prompts()
+            self._prompt_default_cbs = []
 
-        cb_style = (
-            f"QCheckBox {{ spacing: 0px; }}"
-            f"QCheckBox::indicator {{ width: 14px; height: 14px; }}"
-        )
+            cb_style = (
+                f"QCheckBox {{ spacing: 0px; }}"
+                f"QCheckBox::indicator {{ width: 14px; height: 14px; }}"
+            )
 
-        for p in self._prompt_data:
-            pt = p.get("prompt_type", "text")
-            icon_name = 'mdi6.text-box-outline' if pt == "text" else 'mdi6.image-outline'
+            for p in self._prompt_data:
+                pt = p.get("prompt_type", "text")
+                icon_name = 'mdi6.text-box-outline' if pt == "text" else 'mdi6.image-outline'
 
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, p["id"])
-            item.setSizeHint(QSize(0, 42))
-            self._prompt_list.addItem(item)
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, p["id"])
+                item.setSizeHint(QSize(0, 42))
+                self._prompt_list.addItem(item)
 
-            row_w = _PromptRow(p["is_default"])
-            rl = QHBoxLayout(row_w)
-            rl.setContentsMargins(10, 0, 8, 0)
-            rl.setSpacing(8)
+                row_w = _PromptRow(p["is_default"])
+                rl = QHBoxLayout(row_w)
+                rl.setContentsMargins(10, 0, 8, 0)
+                rl.setSpacing(8)
 
-            icon_lbl = QLabel()
-            icon_lbl.setPixmap(qta.icon(icon_name, color=TEXT_TERTIARY).pixmap(QSize(18, 18)))
-            icon_lbl.setFixedSize(18, 18)
-            rl.addWidget(icon_lbl)
+                icon_lbl = QLabel()
+                icon_lbl.setPixmap(qta.icon(icon_name, color=TEXT_TERTIARY).pixmap(QSize(18, 18)))
+                icon_lbl.setFixedSize(18, 18)
+                rl.addWidget(icon_lbl)
 
-            title_lbl = QLabel(p["title"])
-            title_lbl.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:14px;")
-            rl.addWidget(title_lbl, 1)
+                title_lbl = QLabel(p["title"])
+                title_lbl.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:14px;")
+                rl.addWidget(title_lbl, 1)
 
-            cb = QCheckBox()
-            cb.setChecked(p["is_default"])
-            cb.setCursor(Qt.CursorShape.PointingHandCursor)
-            cb.setToolTip("默认")
-            cb.setStyleSheet(cb_style)
-            cb.setFixedSize(18, 18)
-            if not p["is_default"]:
-                cb.setVisible(False)
-            pid = p["id"]
-            cb.toggled.connect(lambda checked, _pid=pid: self._toggle_default(_pid, checked))
-            rl.addWidget(cb)
-            row_w.cb = cb
-            self._prompt_default_cbs.append((pid, cb))
+                cb = QCheckBox()
+                cb.setChecked(p["is_default"])
+                cb.setCursor(Qt.CursorShape.PointingHandCursor)
+                cb.setToolTip("默认")
+                cb.setStyleSheet(cb_style)
+                cb.setFixedSize(18, 18)
+                if not p["is_default"]:
+                    cb.setVisible(False)
+                pid = p["id"]
+                cb.toggled.connect(lambda checked, _pid=pid: self._toggle_default(_pid, checked))
+                rl.addWidget(cb)
+                row_w.cb = cb
+                self._prompt_default_cbs.append((pid, cb))
 
-            self._prompt_list.setItemWidget(item, row_w)
+                self._prompt_list.setItemWidget(item, row_w)
 
-        if self._prompt_list.count() > 0:
-            self._prompt_list.setCurrentRow(0)
+            if select_id is not None:
+                for i in range(self._prompt_list.count()):
+                    it = self._prompt_list.item(i)
+                    if it is not None and it.data(Qt.ItemDataRole.UserRole) == select_id:
+                        row = i
+                        break
+            if row < 0 and self._prompt_list.count() > 0:
+                row = 0
+            if row >= 0:
+                self._prompt_list.setCurrentRow(row)
+        finally:
+            self._prompt_list.blockSignals(False)
+
+        if row >= 0:
+            if refresh_form:
+                self._on_prompt_selected(row)
+        else:
+            self._on_prompt_selected(-1)
+
+    def _row_snapshot_for_update(self, p: dict) -> tuple[str, str, str]:
+        """写库用：当前选中行用右侧表单，其余行用内存条（避免未自动保存时把类型改回旧值）。"""
+        if p["id"] == self._prompt_current_id:
+            title = self._prompt_title.text().strip()
+            content = self._prompt_content.toPlainText().strip()
+            pt = "image" if self._prompt_type_image.isChecked() else "text"
+            return title, content, pt
+        return p["title"], p["content"], p.get("prompt_type", "text")
 
     def _toggle_default(self, prompt_id, checked):
         if not checked:
             for p in self._prompt_data:
                 if p["id"] == prompt_id:
                     p["is_default"] = False
-                    update_prompt(p["id"], p["title"], p["content"], False, p.get("prompt_type", "text"))
+                    title, content, pt = self._row_snapshot_for_update(p)
+                    update_prompt(p["id"], title, content, False, pt)
                     break
             return
         for pid, cb in self._prompt_default_cbs:
@@ -879,12 +910,30 @@ class SettingsDialog(QDialog):
                 cb.setVisible(False)
                 cb.blockSignals(False)
         for p in self._prompt_data:
+            title, content, pt = self._row_snapshot_for_update(p)
             if p["id"] == prompt_id:
                 p["is_default"] = True
-                update_prompt(p["id"], p["title"], p["content"], True, p.get("prompt_type", "text"))
+                update_prompt(p["id"], title, content, True, pt)
             elif p["is_default"]:
                 p["is_default"] = False
-                update_prompt(p["id"], p["title"], p["content"], False, p.get("prompt_type", "text"))
+                update_prompt(p["id"], title, content, False, pt)
+        self._notify_prompts_changed()
+
+    def _on_prompt_type_toggled(self, checked: bool):
+        if not checked:
+            return
+        if not self._prompt_current_id:
+            return
+        if getattr(self, "_prompt_loading", False):
+            return
+        pt = "image" if self._prompt_type_image.isChecked() else "text"
+        update_prompt(self._prompt_current_id, prompt_type=pt)
+        for p in self._prompt_data:
+            if p["id"] == self._prompt_current_id:
+                p["prompt_type"] = pt
+                break
+        self._load_prompts(select_id=self._prompt_current_id, refresh_form=False)
+        self._notify_prompts_changed()
 
     def _on_prompt_selected(self, row: int):
         self._prompt_save_timer.stop()
@@ -909,11 +958,8 @@ class SettingsDialog(QDialog):
 
     def _add_prompt(self):
         new_id = add_prompt("新建 Prompt", "请输入 Prompt 内容...", prompt_type="text")
-        self._load_prompts()
-        for i in range(self._prompt_list.count()):
-            if self._prompt_list.item(i).data(Qt.ItemDataRole.UserRole) == new_id:
-                self._prompt_list.setCurrentRow(i)
-                break
+        self._load_prompts(select_id=new_id)
+        self._notify_prompts_changed()
         self._prompt_title.setFocus()
         self._prompt_title.selectAll()
 
@@ -926,6 +972,7 @@ class SettingsDialog(QDialog):
         ) == QMessageBox.StandardButton.Yes:
             delete_prompt(self._prompt_current_id)
             self._load_prompts()
+            self._notify_prompts_changed()
 
     def _prompt_edit_changed(self):
         if not self._prompt_current_id:
@@ -948,17 +995,20 @@ class SettingsDialog(QDialog):
                 break
         pt = "image" if self._prompt_type_image.isChecked() else "text"
         update_prompt(self._prompt_current_id, title, content, is_default, pt)
-        cur = self._prompt_list.currentRow()
-        self._prompt_loading = True
-        self._load_prompts()
-        if cur < self._prompt_list.count():
-            self._prompt_list.setCurrentRow(cur)
-        self._prompt_loading = False
+        self._load_prompts(select_id=self._prompt_current_id, refresh_form=False)
+        self._notify_prompts_changed()
         self._prompt_status_lbl.setText("已自动保存")
         QTimer.singleShot(2000, lambda: self._prompt_status_lbl.setText(""))
 
+    def _notify_prompts_changed(self):
+        """通知所有活跃的 ScreenshotAICapsule 和 ScreenshotOverlay 实例刷新 prompts 缓存和 UI"""
+        try:
+            from screenshot.toolbar import ScreenshotAICapsule
+            ScreenshotAICapsule.refresh_all_instances()
+        except Exception:
+            pass
+
     # ══════════════════════════════════════════════════════
-    #  验证 API Key
     # ══════════════════════════════════════════════════════
 
     def _verify_provider_key(self):
@@ -1132,6 +1182,7 @@ class SettingsDialog(QDialog):
             pass
 
         QMessageBox.information(self, "成功", "设置已保存")
+        self._notify_prompts_changed()
         self.accept()
 
     def _reset_hotkeys(self):

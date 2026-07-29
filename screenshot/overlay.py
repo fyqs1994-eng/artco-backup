@@ -7,6 +7,7 @@ import math
 import os
 import subprocess
 import uuid
+import weakref
 
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QFileDialog, QMessageBox
 from PySide6.QtCore import Qt, QRect, QSize, Signal, QBuffer, QIODevice, QTimer, QPoint, Property, QPropertyAnimation, QEasingCurve
@@ -199,6 +200,8 @@ class ScreenSelector(QWidget):
 
 
 class ScreenshotOverlay(QWidget):
+    _active_instances = []  # 追踪活跃实例（弱引用），用于 prompt 变更时刷新快捷按钮
+
     def __init__(self, target_screen=None, start_pos=None, prefetched_pixmap=None):
         super().__init__()
         
@@ -308,6 +311,9 @@ class ScreenshotOverlay(QWidget):
         self.activateWindow()
         self.setFocus()
         self.grabKeyboard()  # 抢占系统键盘焦点，防止按键穿透到底层应用
+        
+        # 注册到活跃实例列表
+        self.__class__._active_instances.append(weakref.ref(self))
         
         # 下一事件循环处理起始位置（窗口已显示）
         if start_pos is not None:
@@ -444,6 +450,26 @@ class ScreenshotOverlay(QWidget):
             # 信号驱动位置同步（替代定时器轮询）
             self.ai_capsule.width_changed.connect(self._sync_positions)
         return self.ai_capsule
+
+    @classmethod
+    def refresh_all_quick_buttons(cls):
+        """刷新所有活跃 ScreenshotOverlay 实例的侧边快捷按钮（prompt 变更后调用）"""
+        alive_refs = []
+        for ref in cls._active_instances:
+            instance = ref()
+            if instance is not None:
+                try:
+                    instance._refresh_quick_buttons()
+                except Exception:
+                    pass
+                alive_refs.append(ref)
+        cls._active_instances = alive_refs  # 清理已销毁实例
+
+    def _refresh_quick_buttons(self):
+        """重建本实例的侧边快捷按钮"""
+        self._clear_ai_quick_buttons()
+        if not self.selection_rect.isNull():
+            self._update_ai_quick_buttons_pos()
 
     def _clear_ai_quick_buttons(self):
         """清理侧边 AI 快捷按钮"""
@@ -1922,6 +1948,16 @@ class ScreenshotOverlay(QWidget):
         self.prompt_settings_window = SettingsDialog(self)
         self.prompt_settings_window.show_tab('prompt')
         self.prompt_settings_window.show()
+        # 设置窗口关闭后，清除缓存并重建快捷按钮（确保显示最新 prompt）
+        self.prompt_settings_window.finished.connect(self._on_prompt_editor_closed)
+
+    def _on_prompt_editor_closed(self):
+        """设置窗口关闭后，清除缓存并重建快捷按钮"""
+        ScreenshotAICapsule.invalidate_prompts_cache()
+        self._clear_ai_quick_buttons()
+        # 如果有选区，立即重建并定位快捷按钮
+        if not self.selection_rect.isNull():
+            self._update_ai_quick_buttons_pos()
     
     def _do_ai_process(self, prompt: str = None, prompt_type: str = "text"):
         if self.selection_rect.isNull(): 

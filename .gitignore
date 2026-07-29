@@ -22,7 +22,7 @@ wheels/
 MANIFEST
 
 # PyInstaller
-*.spec
+# *.spec  # spec 文件需要纳入版本控制（build.bat 依赖）
 
 # IDE
 .vscode/
@@ -41,7 +41,10 @@ ai_config.json
 ps_config.json
 prompts.json
 workspace.json
+wecom_config.json
+google_models_debug.json
 history_images/
+_build_tmp/
 dist/
 build/
 extracted/
@@ -53,6 +56,7 @@ extracted/
 
 # Artco specific
 *.exe
+package-lock.json
 ArtcoShellExtension/bin/
 ArtcoShellExtension/obj/
 shell_ext/bin/

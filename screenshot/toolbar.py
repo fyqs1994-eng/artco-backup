@@ -4,6 +4,7 @@
 
 import os
 import re
+import weakref
 
 import qtawesome as qta
 from PySide6.QtWidgets import (
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QLineEdit, QScrollArea, QLabel, QTextEdit, QFileDialog, QApplication
 )
 from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QPropertyAnimation, QEasingCurve, Property, QEvent
-from PySide6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QFont, QIcon, QPen
+from PySide6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QFont, QIcon, QPen, QKeyEvent, QTextCursor
 
 from .canvas import EditorCanvas
 from database import get_all_records, get_image_full_path
@@ -541,6 +542,7 @@ class ScreenshotAICapsule(QWidget):
     
     # 类级别缓存 prompts
     _cached_prompts = None
+    _active_instances = []  # 追踪活跃实例（弱引用）
     
     # 预定义样式字符串，避免重复创建
     _STYLE_AI_BTN_TEXT = """
@@ -585,6 +587,9 @@ class ScreenshotAICapsule(QWidget):
         self._setup_animation()
         self._init_ui()
         
+        # 注册到活跃实例列表
+        self.__class__._active_instances.append(weakref.ref(self))
+        
         # 初始隐藏
         self.hide()
     
@@ -606,11 +611,61 @@ class ScreenshotAICapsule(QWidget):
             prompts = [("默认", "请详细分析这张图片的内容。", "text")]
         cls._cached_prompts = prompts
         return prompts
+
+    def _refresh_prompts(self):
+        """刷新本实例的 prompts 数据和下拉列表 UI（由 refresh_all_instances 调用）"""
+        self._prompts = self._load_prompts()
+        
+        # 清空旧的下拉列表按钮
+        if hasattr(self, '_template_buttons'):
+            for _, btn, _ in self._template_buttons:
+                btn.deleteLater()
+        self._template_buttons = []
+        
+        # 重建下拉列表
+        if hasattr(self, '_dropdown'):
+            old_layout = self._dropdown._scroll.widget().layout() if self._dropdown._scroll.widget() else None
+            if old_layout:
+                while old_layout.count():
+                    item = old_layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+            
+            dropdown_inner_layout = QVBoxLayout()
+            dropdown_inner_layout.setContentsMargins(6, 6, 6, 6)
+            dropdown_inner_layout.setSpacing(2)
+            
+            for name, content, prompt_type in self._prompts:
+                btn = _DropdownItemButton(name, prompt_type)
+                btn.clicked.connect(lambda checked, n=name, c=content, t=prompt_type: self._on_template_clicked(n, c, t))
+                dropdown_inner_layout.addWidget(btn)
+                self._template_buttons.append((name, btn, prompt_type))
+            
+            self._dropdown.setContentLayout(dropdown_inner_layout)
     
     @classmethod
     def invalidate_prompts_cache(cls):
         """清除 prompts 缓存（在编辑 prompts 后调用）"""
         cls._cached_prompts = None
+
+    @classmethod
+    def refresh_all_instances(cls):
+        """刷新所有活跃实例的 prompts 缓存和下拉列表 UI"""
+        cls._cached_prompts = None  # 清除缓存
+        alive_refs = []
+        for ref in cls._active_instances:
+            instance = ref()
+            if instance is not None:
+                instance._refresh_prompts()
+                alive_refs.append(ref)
+        cls._active_instances = alive_refs  # 清理已销毁实例
+        
+        # 同时刷新所有活跃 ScreenshotOverlay 实例的侧边快捷按钮
+        try:
+            from .overlay import ScreenshotOverlay
+            ScreenshotOverlay.refresh_all_quick_buttons()
+        except Exception:
+            pass
     
     def _setup_animation(self):
         """设置动画 - 使用单一 fixedWidth 动画避免双属性重绘"""
@@ -1346,6 +1401,34 @@ class ScreenshotToolbar(QWidget):
         event.accept()  # 展开状态下也消费事件，防止穿透到 overlay
 
 
+class AnnotationTextEdit(QTextEdit):
+    """侧栏注释输入框：Tab 切到下一条，Shift+Tab 切到上一条。"""
+
+    def __init__(self, number: int, panel: "NumberAnnotationPanel", parent=None):
+        super().__init__(parent)
+        self._number = number
+        self._panel = panel
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_Tab:
+            extra = (
+                Qt.KeyboardModifier.ShiftModifier
+                | Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.MetaModifier
+                | Qt.KeyboardModifier.AltModifier
+            )
+            mods = event.modifiers() & extra
+            if mods == Qt.KeyboardModifier.NoModifier:
+                self._panel._focus_adjacent_feedback(self._number, 1)
+                event.accept()
+                return
+            if mods == Qt.KeyboardModifier.ShiftModifier:
+                self._panel._focus_adjacent_feedback(self._number, -1)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
 class NumberAnnotationPanel(QWidget):
     """序号注释侧栏 - 自动弹出"""
     
@@ -1355,7 +1438,7 @@ class NumberAnnotationPanel(QWidget):
         super().__init__(parent)
         self._annotations: dict[int, str] = {}  # {序号: 注释文字}
         self._images: dict[int, QPixmap] = {}  # {序号: 附加图片}
-        self._text_edits: dict[int, QLineEdit] = {}  # {序号: 输入框}
+        self._text_edits: dict[int, QTextEdit] = {}  # {序号: 输入框}
         self._image_labels: dict[int, QLabel] = {}  # {序号: 图片预览标签}
         self._visible_count = 0
         self.init_ui()
@@ -1402,6 +1485,7 @@ class NumberAnnotationPanel(QWidget):
         self.content_layout.addStretch(1)
         
         scroll.setWidget(self.content_widget)
+        self._annotation_scroll = scroll
         layout.addWidget(scroll)
         
         self.setStyleSheet("""
@@ -1455,7 +1539,7 @@ class NumberAnnotationPanel(QWidget):
         row_layout.addWidget(number_label, 0, Qt.AlignmentFlag.AlignTop)
         
         # 输入框（极简透明背景）
-        text_edit = QTextEdit()
+        text_edit = AnnotationTextEdit(number, self)
         text_edit.setPlaceholderText("输入注释...")
         text_edit.setObjectName(f"annotation_edit_{number}")
         text_edit.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -1620,6 +1704,22 @@ class NumberAnnotationPanel(QWidget):
         """聚焦到指定序号的输入框"""
         if number in self._text_edits:
             self._text_edits[number].setFocus()
+
+    def _focus_adjacent_feedback(self, current: int, delta: int) -> None:
+        """在侧栏注释条目中按序号顺序移动焦点（delta=±1）。"""
+        nums = sorted(self._text_edits.keys())
+        if not nums or current not in nums:
+            return
+        idx = nums.index(current) + delta
+        if idx < 0 or idx >= len(nums):
+            return
+        target = self._text_edits[nums[idx]]
+        target.setFocus()
+        c = target.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End)
+        target.setTextCursor(c)
+        if getattr(self, "_annotation_scroll", None) is not None:
+            self._annotation_scroll.ensureWidgetVisible(target)
 
     def renumber(self, old_to_new: dict[int, int]):
         """重新编号（当序号点被删除后调整）"""
