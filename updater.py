@@ -117,7 +117,7 @@ def check_for_update(timeout: int = 10) -> tuple:
     """
     try:
         import requests
-        resp = requests.get(UPDATE_MANIFEST_URL, timeout=timeout)
+        resp = requests.get(UPDATE_MANIFEST_URL, timeout=(5, timeout))
         if resp.status_code != 200:
             return False, None
         info = resp.json()

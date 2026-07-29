@@ -89,7 +89,29 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['rthook_qt_api.py'],
-    excludes=[],
+    excludes=[
+        # 以下大包项目代码未使用，但环境中已安装，必须排除以防 exe 膨胀
+        'torch',           # ~750MB，AI 训练框架，项目未使用
+        'torchvision',     # ~50MB，torch 配套，项目未使用
+        'scipy',           # ~120MB，科学计算，项目未使用
+        'scikit_image',    # ~100MB，图像处理，项目未使用
+        'skimage',         # scikit-image 的模块名
+        'cv2',             # ~60MB，opencv，项目未使用
+        'opencv',          # opencv 的包名
+        'matplotlib',      # ~150MB，绘图库，项目未使用
+        'pandas',          # ~150MB，数据处理，项目未使用
+        'IPython',         # ~50MB，交互式 shell
+        'jupyter',         # ~50MB，notebook
+        'notebook',        # jupyter notebook
+        'pytest',          # 测试框架
+        'sphinx',          # 文档生成
+        'tkinter',         # Tk GUI，项目用 Qt
+        'PyQt5',           # 项目用 PySide6
+        'PyQt6',           # 项目用 PySide6
+        'PyQt6.QtWidgets', # 防止误打包
+        'PyQt6.QtCore',    # 防止误打包
+        'PyQt6.QtGui',     # 防止误打包
+    ],
     cipher=block_cipher,
 )
 

@@ -51,6 +51,8 @@ class CapsuleWidget(QWidget):
     """胶囊浮窗 - 主界面"""
     hotkey_triggered = Signal()
     clipboard_float_requested = Signal()  # 请求显示剪贴板悬浮面板
+    update_check_result = Signal(bool, object)  # 检查更新结果
+    update_check_timeout = Signal()  # 检查更新超时
     
     def __init__(self):
         super().__init__()
@@ -73,6 +75,8 @@ class CapsuleWidget(QWidget):
         
         self.hotkey_triggered.connect(self.start_screenshot)
         self.clipboard_float_requested.connect(self._show_clipboard_float)
+        self.update_check_result.connect(self._on_tray_update_result)
+        self.update_check_timeout.connect(self._on_tray_update_timeout)
         
         self.init_ui()
         self._saved_pos = None
@@ -1306,21 +1310,43 @@ class CapsuleWidget(QWidget):
             "Artco", "正在检查更新…",
             QSystemTrayIcon.MessageIcon.NoIcon, 2000
         )
+        # 兜底定时器：15 秒后强制提示超时
+        self._tray_update_timer = QTimer(self)
+        self._tray_update_timer.setSingleShot(True)
+        self._tray_update_timer.timeout.connect(self.update_check_timeout.emit)
+        self._tray_update_timer.start(15000)
+
         threading.Thread(target=self._do_manual_check, daemon=True).start()
 
     def _do_manual_check(self):
         """后台线程：手动检查"""
         has_update, info = updater.check_for_update()
         updater._save_check_time()
+        self.update_check_result.emit(has_update, info)
+
+    def _on_tray_update_result(self, has_update: bool, info):
+        """托盘检查更新结果回调（主线程）"""
+        if hasattr(self, '_tray_update_timer') and self._tray_update_timer:
+            self._tray_update_timer.stop()
+            self._tray_update_timer = None
         if has_update:
             version = info.get("version", "?")
             changelog = info.get("changelog", "")
-            QTimer.singleShot(0, lambda: self._show_update_dialog(version, changelog, info))
+            self._show_update_dialog(version, changelog, info)
         else:
-            QTimer.singleShot(0, lambda: self.tray_icon.showMessage(
+            self.tray_icon.showMessage(
                 "Artco", "已是最新版本 ✓",
                 QSystemTrayIcon.MessageIcon.Information, 2000
-            ))
+            )
+
+    def _on_tray_update_timeout(self):
+        """托盘检查更新超时回调（主线程）"""
+        if hasattr(self, '_tray_update_timer') and self._tray_update_timer:
+            self._tray_update_timer = None
+        self.tray_icon.showMessage(
+            "Artco", "检查更新超时，请稍后重试",
+            QSystemTrayIcon.MessageIcon.Warning, 3000
+        )
 
     def _show_update_dialog(self, version: str, changelog: str, info: dict):
         """显示更新对话框，让用户选择立即更新/稍后/跳过"""

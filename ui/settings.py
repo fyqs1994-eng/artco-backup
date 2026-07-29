@@ -131,6 +131,7 @@ class _PromptRow(QWidget):
 class SettingsDialog(QDialog):
     """设置对话框 — Raycast 风格"""
     hotkey_changed = Signal()
+    update_check_result = Signal(bool, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -140,6 +141,8 @@ class SettingsDialog(QDialog):
         self._current_provider_detail = None
         self._prompt_current_id = None
         self._prompt_data: list = []
+        self._update_check_timer = None
+        self.update_check_result.connect(self._on_check_result)
         self.init_ui()
 
     # ══════════════════════════════════════════════════════
@@ -1246,15 +1249,33 @@ class SettingsDialog(QDialog):
         self.btn_check_update.setEnabled(False)
         self.btn_check_update.setText("检查中…")
 
+        # 兜底定时器：15 秒后强制恢复按钮状态（防止网络挂死导致 UI 卡死）
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.setSingleShot(True)
+        self._update_check_timer.timeout.connect(self._on_check_timeout)
+        self._update_check_timer.start(15000)
+
         def do_check():
             has_update, info = updater_mod.check_for_update()
             updater_mod._save_check_time()
-            QTimer.singleShot(0, lambda: self._on_check_result(has_update, info))
+            self.update_check_result.emit(has_update, info)
 
         threading.Thread(target=do_check, daemon=True).start()
 
+    def _on_check_timeout(self):
+        """检查超时兜底：恢复按钮状态并提示"""
+        if self._update_check_timer:
+            self._update_check_timer.stop()
+            self._update_check_timer = None
+        self.btn_check_update.setEnabled(True)
+        self.btn_check_update.setText("检查更新")
+        QMessageBox.warning(self, "检查更新", "网络超时，请稍后重试。")
+
     def _on_check_result(self, has_update: bool, info):
         """检查结果回调"""
+        if self._update_check_timer:
+            self._update_check_timer.stop()
+            self._update_check_timer = None
         self.btn_check_update.setEnabled(True)
         self.btn_check_update.setText("检查更新")
 
