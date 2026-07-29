@@ -24,7 +24,7 @@ from ui.theme import (
     ACCENT_PRIMARY, ACCENT_SUBTLE, COLOR_ERROR, RADIUS_SM, RADIUS_MD, RADIUS_LG,
     FONT_FAMILY, FONT_SIZE_SM, FONT_SIZE_MD, get_scrollbar_style
 )
-from ui.archive import ClipboardHistoryManager, ClipboardItem
+from ui.archive import ClipboardHistoryManager, ClipboardItem, _is_probably_image_file
 
 
 class ClipboardFloatCard(QFrame):
@@ -38,7 +38,49 @@ class ClipboardFloatCard(QFrame):
         self._drag_start_pos = None
         self._is_dragging = False
         self._temp_file_path = None
+        self._cached_thumb = None  # 预缓存的缩略图（image/file 类型图片用，拖拽时避免全图编码）
+        self._thumb_cached = False  # 标记是否已尝试缓存
         self.init_ui()
+    
+    def _ensure_thumb_cached(self):
+        """延迟生成缩略图缓存（仅首次调用时执行，避免卡片重建时批量解码大图导致卡顿）"""
+        if self._thumb_cached:
+            return
+        self._thumb_cached = True
+        if self.item.content_type == "image":
+            pm = self.item.content
+            if pm and not pm.isNull():
+                self._cached_thumb = pm.scaled(
+                    200, 200,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+        elif self.item.content_type == "file":
+            paths = self.item.file_paths()
+            if len(paths) == 1 and _is_probably_image_file(paths[0]):
+                self._cached_thumb = self.item.try_get_thumbnail(200, 200)
+
+    def _is_file_image(self) -> bool:
+        """判断 file 类型是否为单个图片文件"""
+        if self.item.content_type != "file":
+            return False
+        paths = self.item.file_paths()
+        return len(paths) == 1 and _is_probably_image_file(paths[0])
+
+    def _load_thumb_async(self, label: QLabel):
+        """异步加载缩略图并更新到 QLabel（事件循环空闲时调用，不阻塞 UI）"""
+        self._ensure_thumb_cached()
+        if self._cached_thumb is not None and not self._cached_thumb.isNull():
+            scaled = self._cached_thumb.scaled(
+                88, 88,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            if scaled.width() > 88 or scaled.height() > 88:
+                x = (scaled.width() - 88) // 2
+                y = (scaled.height() - 88) // 2
+                scaled = scaled.copy(x, y, 88, 88)
+            label.setPixmap(scaled)
     
     def init_ui(self):
         # 正方形卡片
@@ -70,8 +112,17 @@ class ClipboardFloatCard(QFrame):
                 thumb_label.setPixmap(scaled)
             
             layout.addWidget(thumb_label)
+        elif self.item.content_type == "file" and self._is_file_image():
+            # file 类型图片（大图）：异步加载缩略图，避免复制瞬间同步解码大文件卡顿
+            thumb_label = QLabel()
+            thumb_label.setFixedSize(88, 88)
+            thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb_label.setObjectName("thumb_image")
+            layout.addWidget(thumb_label)
+            # 延迟到事件循环空闲时加载缩略图（不阻塞复制流程）
+            QTimer.singleShot(0, lambda: self._load_thumb_async(thumb_label))
         else:
-            # 文本 / 文件（文件只显示文件名或「N 个文件」，不占满整格路径）
+            # 文本 / 非图片文件（显示文件名或「N 个文件」）
             text_label = QLabel()
             text_label.setFixedSize(88, 88)
             text_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -140,26 +191,63 @@ class ClipboardFloatCard(QFrame):
     
     def _start_drag(self):
         """启动拖拽操作"""
+        self._ensure_thumb_cached()  # 确保缩略图已缓存（延迟加载）
         drag = QDrag(self)
         mime_data = QMimeData()
+        # 判断文件来源路径（image 类型有 source_file_path，file 类型大图取 file_paths[0]）
         source_path = self.item.source_file_path if self.item.content_type == "image" else None
+        if not source_path and self.item.content_type == "file":
+            paths = self.item.file_paths()
+            if len(paths) == 1:
+                source_path = paths[0]
+
         if source_path and os.path.isfile(source_path):
-            # 文件来源图片：拖拽优先传源文件 URL，避免二次编码导致质量损失
+            # 文件来源图片：URL + image MIME 双保险
+            # image 类型：pixmap 已在内存，直接用全图
+            # file 类型（大图）：用预缓存的缩略图，跳过 image MIME 编码，只设 URL + 预览
             file_url = QUrl.fromLocalFile(source_path)
             mime_data.setUrls([file_url])
             mime_data.setData("text/uri-list", file_url.toString().encode("utf-8"))
+
+            if self.item.content_type == "image":
+                # image 类型：用预缓存缩略图做 MIME 编码（避免全图编码卡顿）
+                # 目标应用通过 file:// URL 读取原始画质文件
+                thumb = self._cached_thumb
+                if thumb is not None and not thumb.isNull():
+                    from PySide6.QtCore import QBuffer, QIODevice
+                    has_alpha = thumb.hasAlphaChannel()
+                    img_fmt = "PNG" if has_alpha else "JPEG"
+                    img_mime = "image/png" if has_alpha else "image/jpeg"
+                    buf = QBuffer()
+                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                    if thumb.save(buf, img_fmt, 85 if img_fmt == "JPEG" else -1):
+                        mime_data.setData(img_mime, buf.data().data())
+                    buf.close()
+
+                    ps = min(80, thumb.width(), thumb.height())
+                    scaled = thumb.scaled(
+                        ps, ps,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation
+                    )
+                    drag.setPixmap(scaled)
+                    drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
+            else:
+                # file 类型大图：直接用缓存缩略图做拖拽预览，不编码 image MIME
+                # 目标应用通过 file:// URL 读取原始文件，无需内嵌图片字节
+                thumb = self._cached_thumb
+                if thumb is not None and not thumb.isNull():
+                    ps = min(80, thumb.width(), thumb.height())
+                    scaled = thumb.scaled(
+                        ps, ps,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.FastTransformation
+                    )
+                    drag.setPixmap(scaled)
+                    drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
+
             drag.setMimeData(mime_data)
-            preview = self.item.try_get_pixmap()
-            if preview is not None and not preview.isNull():
-                ps = min(80, preview.width(), preview.height())
-                scaled = preview.scaled(
-                    ps, ps,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.FastTransformation
-                )
-                drag.setPixmap(scaled)
-                drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
-            result = drag.exec(Qt.DropAction.CopyAction)
+            drag.exec(Qt.DropAction.CopyAction)
             return
         
         pixmap = None
@@ -229,11 +317,11 @@ class ClipboardFloatCard(QFrame):
                     uri_list = file_url.toString()
                     mime_data.setData("text/uri-list", uri_list.encode('utf-8'))
                     
-                    # 设置浏览器特定的 MIME 类型
-                    mime_data.setData("application/x-moz-file", temp_path.encode('utf-8'))
+                    # 设置浏览器特定的 MIME 类型（存 URL 而非裸路径，避免解析混乱）
+                    mime_data.setData("application/x-moz-file", file_url.toString().encode('utf-8'))
                     
-                    # 设置通用文件类型
-                    mime_data.setData("application/octet-stream", image_data)
+                    # 注意：不设置 application/octet-stream
+                    # 某些 Electron 应用会优先读取该格式，把图片当未知二进制流处理导致解码失败
             
             # 设置拖拽预览（缩放小图，避免卡顿）
             preview_size = min(80, pixmap.width(), pixmap.height())
@@ -256,9 +344,9 @@ class ClipboardFloatCard(QFrame):
         
         drag.setMimeData(mime_data)
         drag.exec(Qt.DropAction.CopyAction)
-        # 拖拽完成后延迟清理临时文件（给浏览器时间读取文件）
-        # 延迟 5 秒清理，避免浏览器异步读取时文件已被删除
-        self.cleanup(delay_ms=5000)
+        # 拖拽完成后延迟清理临时文件（给应用异步上传留足时间）
+        # 30 秒，确保企微等 Electron 应用排队上传时文件仍可用
+        self.cleanup(delay_ms=30000)
     
     def _save_temp_image(self, pixmap: QPixmap) -> Optional[str]:
         """保存图片到临时文件（用于拖拽到某些应用）"""

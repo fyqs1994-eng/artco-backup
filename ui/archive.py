@@ -819,6 +819,7 @@ _CLIPBOARD_IMAGE_FILE_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".ico",
 })
 _MAX_CLIPBOARD_IMAGE_FILE_BYTES = 256 * 1024 * 1024  # 超过则仍按「文件」记录，避免内存爆
+_MAX_CLIPBOARD_IMAGE_PIXELS = 50_000_000  # 解码后像素数上限（≈200MB @ 4字节/像素），超过则不加载全图
 
 
 def _is_probably_image_file(path: str) -> bool:
@@ -833,6 +834,14 @@ def _load_pixmap_from_local_image_file(path: str) -> Optional[QPixmap]:
             return None
     except OSError:
         return None
+    # 像素维度检查：用 QImageReader 读取尺寸，避免解码超大像素图导致内存爆炸
+    # 例如 11000×7000 = 7700万像素 ≈ 308MB 解码内存，文件可能仅 17MB
+    from PySide6.QtGui import QImageReader
+    reader = QImageReader(path)
+    if reader.canRead():
+        size = reader.size()
+        if size.width() * size.height() > _MAX_CLIPBOARD_IMAGE_PIXELS:
+            return None
     pm = QPixmap(path)
     if pm.isNull():
         return None
@@ -898,6 +907,29 @@ class ClipboardItem:
                 return _load_pixmap_from_local_image_file(paths[0])
         return None
 
+    def try_get_thumbnail(self, width: int = 152, height: int = 122) -> Optional[QPixmap]:
+        """高效获取缩略图（使用 QImageReader 解码阶段缩放，不受 256MB 限制，内存占用极低）。
+        image 类型直接缩放返回；file 类型为单个图片文件时用 QImageReader 按需解码。
+        非图片或解码失败返回 None。"""
+        if self.content_type == "image":
+            pm = self.content
+            if pm and not pm.isNull():
+                return pm.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                 Qt.TransformationMode.SmoothTransformation)
+            return None
+        if self.content_type == "file":
+            paths = self.file_paths()
+            if len(paths) == 1 and _is_probably_image_file(paths[0]):
+                from PySide6.QtGui import QImageReader
+                reader = QImageReader(paths[0])
+                if reader.canRead():
+                    reader.setScaledSize(QSize(width, height))
+                    img = reader.read()
+                    if not img.isNull():
+                        return QPixmap.fromImage(img)
+            return None
+        return None
+
 
 class ClipboardHistoryManager:
     """剪贴板历史管理器（单例）"""
@@ -940,11 +972,61 @@ class ClipboardHistoryManager:
             pass
     
     def _on_clipboard_changed(self):
-        """剪贴板内容变化（优化版：增强兼容性）"""
+        """剪贴板内容变化（防抖：企微等应用可能连续触发多次，只处理最终状态）"""
+        if not hasattr(self, '_debounce_timer') or self._debounce_timer is None:
+            self._debounce_timer = QTimer()
+            self._debounce_timer.setSingleShot(True)
+            self._debounce_timer.timeout.connect(self._process_clipboard)
+        self._debounce_timer.start(150)
+
+    def _process_clipboard(self):
+        """实际处理剪贴板内容（防抖后调用，读取最终状态）"""
         clipboard = QApplication.clipboard()
         mime_data = clipboard.mimeData()
-        
-        # 本地文件（优先于文本）：避免大文件复制时把整段路径当文本塞进历史格子
+
+        # 优先级1：图片数据
+        # 企微等 Electron 应用复制图片时会同时附带 file:// 文本，
+        # 优先取图片，避免把 file:// 地址当文本塞进历史格子
+        # 但超大图（>256MB）仍走文件路径，避免内存爆炸
+        if mime_data.hasImage():
+            # 大图守卫：如果同时有本地文件 URL 且文件超 256MB 或像素数超 5000万，跳过图片加载
+            _skip_image = False
+            _skip_file_path = None
+            if mime_data.hasUrls():
+                for u in mime_data.urls():
+                    if u.isLocalFile():
+                        fp = u.toLocalFile()
+                        if os.path.isfile(fp):
+                            if os.path.getsize(fp) > _MAX_CLIPBOARD_IMAGE_FILE_BYTES:
+                                _skip_image = True
+                                _skip_file_path = fp
+                                break
+                            # 像素维度检查：文件可能很小但像素数巨大（如 11000×7000 JPEG 仅 17MB 但解码 308MB）
+                            from PySide6.QtGui import QImageReader
+                            ir = QImageReader(fp)
+                            if ir.canRead():
+                                sz = ir.size()
+                                if sz.width() * sz.height() > _MAX_CLIPBOARD_IMAGE_PIXELS:
+                                    _skip_image = True
+                                    _skip_file_path = fp
+                                    break
+            if _skip_image and _skip_file_path:
+                # 超大图直接创建 file 条目，避免落入优先级2重复 QImageReader 检查
+                content_hash = hash(tuple([os.path.normcase(_skip_file_path)]))
+                if content_hash != self._last_content_hash:
+                    self._last_content_hash = content_hash
+                    self._add_item(ClipboardItem("file", [_skip_file_path]))
+                return
+            # 正常图片（非超大图）：加载 pixmap 并添加到历史
+            pixmap = self._get_image_from_mime_data(mime_data, clipboard)
+            if pixmap is not None and not pixmap.isNull():
+                content_hash = self._compute_image_hash(pixmap)
+                if content_hash and content_hash != self._last_content_hash:
+                    self._last_content_hash = content_hash
+                    self._add_item(ClipboardItem("image", pixmap))
+                return
+
+        # 优先级2：本地文件 URL
         if mime_data.hasUrls():
             local_paths: List[str] = []
             seen = set()
@@ -955,7 +1037,6 @@ class ClipboardHistoryManager:
                         seen.add(p)
                         local_paths.append(p)
             if local_paths:
-                # 单文件且为常见图片格式：载入为位图，剪贴板历史里存「图片」而不是路径
                 if len(local_paths) == 1 and _is_probably_image_file(local_paths[0]):
                     pm = _load_pixmap_from_local_image_file(local_paths[0])
                     if pm is not None and not pm.isNull():
@@ -969,24 +1050,15 @@ class ClipboardHistoryManager:
                     self._last_content_hash = content_hash
                     self._add_item(ClipboardItem("file", local_paths))
                 return
-        
-        if mime_data.hasImage():
-            # 尝试多种方式获取图片
-            pixmap = self._get_image_from_mime_data(mime_data, clipboard)
-            
-            if pixmap is None or pixmap.isNull():
-                return
-            
-            # 使用内容哈希进行去重（cacheKey() 不可靠，每次创建都不同）
-            content_hash = self._compute_image_hash(pixmap)
-            if content_hash and content_hash != self._last_content_hash:
-                self._last_content_hash = content_hash
-                # 直接同步处理
-                self._add_item(ClipboardItem("image", pixmap))
-                
-        elif mime_data.hasText():
+
+        # 优先级3：文本（过滤纯 file:// 地址）
+        if mime_data.hasText():
             text = clipboard.text()
             if text.strip():
+                stripped = text.strip()
+                lines = [l.strip() for l in stripped.split('\n') if l.strip()]
+                if lines and all(l.startswith('file://') for l in lines):
+                    return
                 content_hash = hash(text)
                 if content_hash != self._last_content_hash:
                     self._last_content_hash = content_hash
@@ -1195,18 +1267,38 @@ class ClipboardCard(QWidget):
             self.type_badge.adjustSize()
             self.type_badge.move(6, 6)
         elif self.item.content_type == "file":
-            text_label = QLabel()
-            text_label.setFixedSize(152, 122)
-            text_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-            text_label.setWordWrap(True)
-            text_label.setObjectName("text_preview")
-            text_label.setText(self.item.get_preview_text(150))
-            content_layout.addWidget(text_label)
-            self.type_badge = QLabel(self.content_container)
-            self.type_badge.setText("文件")
-            self.type_badge.setObjectName("type_badge_file")
-            self.type_badge.adjustSize()
-            self.type_badge.move(6, 6)
+            # 如果是单个图片文件，尝试用 QImageReader 高效加载缩略图
+            thumb = self.item.try_get_thumbnail(152, 122)
+            if thumb is not None and not thumb.isNull():
+                thumb_label = QLabel()
+                thumb_label.setFixedSize(152, 122)
+                thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                scaled = thumb.scaled(152, 122, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                      Qt.TransformationMode.SmoothTransformation)
+                if scaled.width() > 152 or scaled.height() > 122:
+                    x = (scaled.width() - 152) // 2
+                    y = (scaled.height() - 122) // 2
+                    scaled = scaled.copy(x, y, 152, 122)
+                thumb_label.setPixmap(scaled)
+                content_layout.addWidget(thumb_label)
+                self.type_badge = QLabel(self.content_container)
+                self.type_badge.setText("图片")
+                self.type_badge.setObjectName("type_badge_image")
+                self.type_badge.adjustSize()
+                self.type_badge.move(6, 6)
+            else:
+                text_label = QLabel()
+                text_label.setFixedSize(152, 122)
+                text_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+                text_label.setWordWrap(True)
+                text_label.setObjectName("text_preview")
+                text_label.setText(self.item.get_preview_text(150))
+                content_layout.addWidget(text_label)
+                self.type_badge = QLabel(self.content_container)
+                self.type_badge.setText("文件")
+                self.type_badge.setObjectName("type_badge_file")
+                self.type_badge.adjustSize()
+                self.type_badge.move(6, 6)
         else:
             # 文本类型
             text_label = QLabel()
