@@ -62,6 +62,11 @@ ArtcoShellExtension/bin/
 ArtcoShellExtension/obj/
 shell_ext/bin/
 shell_ext/obj/
+**/bin/Release/
+**/obj/Release/
+**/obj/project.assets.json
+**/obj/*.cache
+**/obj/*.nuget.*
 screenshot/__pycache__/
 ui/__pycache__/
 
