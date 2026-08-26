@@ -131,7 +131,7 @@ class AIImageResultWindow(QWidget):
         self.container.setStyleSheet("""
             #container {
                 background-color: white;
-                border-radius: 16px;
+                border-radius: 12px;
                 border: 1px solid #e0e0e0;
             }
             QPushButton {
@@ -144,7 +144,7 @@ class AIImageResultWindow(QWidget):
             }
             QPushButton:hover { background-color: #e8e8e8; color: #333; }
             #btn_close { background-color: transparent; border: none; padding: 0; }
-            #btn_close:hover { background-color: rgba(255,0,0,0.1); border-radius: 12px; }
+            #btn_close:hover { background-color: rgba(255,0,0,0.1); border-radius: 8px; }
         """)
         
         # 阴影效果
@@ -583,7 +583,7 @@ class AIResultBubble(QWidget):
         self.container.setStyleSheet("""
             #bubble_container {
                 background-color: white;
-                border-radius: 16px;
+                border-radius: 12px;
                 border: 1px solid #e0e0e0;
             }
             QPushButton {
@@ -596,7 +596,7 @@ class AIResultBubble(QWidget):
             }
             QPushButton:hover { background-color: #e8e8e8; color: #333; }
             #btn_bubble_close { background-color: transparent; border: none; padding: 0; }
-            #btn_bubble_close:hover { background-color: rgba(255,0,0,0.1); border-radius: 12px; }
+            #btn_bubble_close:hover { background-color: rgba(255,0,0,0.1); border-radius: 8px; }
             QScrollArea#chat_scroll {
                 border: none;
                 background-color: transparent;
@@ -622,7 +622,7 @@ class AIResultBubble(QWidget):
             QLineEdit#chat_input {
                 background-color: #f5f5f5;
                 border: 1px solid #e0e0e0;
-                border-radius: 16px;
+                border-radius: 8px;
                 padding: 6px 14px;
                 font-size: 13px;
                 color: #333;
@@ -636,7 +636,7 @@ class AIResultBubble(QWidget):
                     stop:0 rgba(99, 102, 241, 0.9),
                     stop:1 rgba(139, 92, 246, 0.9));
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
                 padding: 0;
             }
             QPushButton#btn_send:hover {

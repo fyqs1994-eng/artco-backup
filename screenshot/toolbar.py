@@ -9,8 +9,7 @@ import weakref
 import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QGraphicsDropShadowEffect,
-    QButtonGroup, QLineEdit, QScrollArea, QLabel, QTextEdit, QFileDialog, QApplication
-)
+    QButtonGroup, QLineEdit, QScrollArea, QLabel, QTextEdit, QFileDialog, QApplication)
 from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QPropertyAnimation, QEasingCurve, Property, QEvent
 from PySide6.QtGui import QColor, QPainter, QPixmap, QPainterPath, QFont, QIcon, QPen, QKeyEvent, QTextCursor
 
@@ -60,7 +59,7 @@ class ColorBubble(QWidget):
                 QPushButton {{
                     background-color: {color.name()};
                     border: {border};
-                    border-radius: 11px;
+border-radius: 5px;
                 }}
                 QPushButton:hover {{
                     border: 2px solid rgba(0, 120, 215, 0.8);
@@ -85,7 +84,7 @@ class ColorBubble(QWidget):
                     QPushButton {{
                         background-color: {color.name()};
                         border: 2px solid rgba(0, 120, 215, 0.9);
-                        border-radius: 11px;
+border-radius: 5px;
                     }}
                 """)
             else:
@@ -94,7 +93,7 @@ class ColorBubble(QWidget):
                     QPushButton {{
                         background-color: {color.name()};
                         border: {border};
-                        border-radius: 11px;
+border-radius: 5px;
                     }}
                     QPushButton:hover {{
                         border: 2px solid rgba(0, 120, 215, 0.8);
@@ -117,7 +116,7 @@ class ColorBubble(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 255, 240))
-        painter.drawRoundedRect(self.rect(), 12, 12)
+        painter.drawRoundedRect(self.rect(), 8, 8)
     
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
@@ -158,10 +157,10 @@ class _OverlayColorPanel(QWidget):
         for b in self._btns:
             c = b.property("_color")
             if c == self._current_color:
-                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:2px solid rgba(0,120,215,0.9);border-radius:11px;}}")
+                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:2px solid rgba(0,120,215,0.9);border-radius:5px;}}")
             else:
                 bd = "2px solid rgba(0,0,0,0.25)" if c == QColor(255,255,255) else "2px solid transparent"
-                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:{bd};border-radius:11px;}}QPushButton:hover{{border:2px solid rgba(0,120,215,0.7);}}")
+                b.setStyleSheet(f"QPushButton{{background:{c.name()};border:{bd};border-radius:5px;}}QPushButton:hover{{border:2px solid rgba(0,120,215,0.7);}}")
 
     def sizeHint(self):
         n = len(PRESET_COLORS)
@@ -207,22 +206,22 @@ class ColorIndicatorButton(QPushButton):
         if bg is not None:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(bg)
-            painter.drawRoundedRect(self.rect(), 18, 18)
+            painter.drawRoundedRect(self.rect(), 8, 8)
 
         # 绘制中心颜色指示，更克制一些
         center = self.rect().center()
-        outer_radius = 7
-        inner_radius = 5
+        outer_size = 14
+        inner_size = 10
 
         # 中性外圈，避免视觉过于扎眼，同时白色也能被看见
         painter.setPen(QPen(QColor(0, 0, 0, 35), 1))
         painter.setBrush(QColor(255, 255, 255, 160))
-        painter.drawEllipse(center, outer_radius, outer_radius)
+        painter.drawRoundedRect(center.x() - outer_size // 2, center.y() - outer_size // 2, outer_size, outer_size, 3, 3)
 
         # 内部颜色点
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(self._color)
-        painter.drawEllipse(center, inner_radius, inner_radius)
+        painter.drawRoundedRect(center.x() - inner_size // 2, center.y() - inner_size // 2, inner_size, inner_size, 2, 2)
 
 
 class EditorToolbar(QWidget):
@@ -336,7 +335,7 @@ class EditorToolbar(QWidget):
             QPushButton {
                 background-color: transparent;
                 border: none;
-                border-radius: 18px;
+                border-radius: 8px;
             }
             QPushButton:hover {
                 background-color: rgba(0, 0, 0, 0.08);
@@ -359,7 +358,7 @@ class EditorToolbar(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 255, 230))
-        painter.drawRoundedRect(self.rect(), 16, 16)
+        painter.drawRoundedRect(self.rect(), 10, 10)
     
     def _on_color_btn_clicked(self):
         """点击颜色按钮 - 在按钮右侧弹出气泡"""
@@ -472,7 +471,7 @@ class _DropdownPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self._margin = 8  # 阴影留白
-        self._radius = 12
+        self._radius = 8
         
         # 外层布局 — 留出阴影空间
         self._outer_layout = QVBoxLayout(self)
@@ -550,7 +549,7 @@ class ScreenshotAICapsule(QWidget):
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                 stop:0 rgba(99, 102, 241, 0.9),
                 stop:1 rgba(139, 92, 246, 0.9));
-            border-radius: 18px;
+            border-radius: 8px;
         }
         QPushButton#btn_ai_main:hover {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -563,7 +562,7 @@ class ScreenshotAICapsule(QWidget):
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                 stop:0 rgba(236, 72, 153, 0.9),
                 stop:1 rgba(244, 114, 182, 0.9));
-            border-radius: 18px;
+            border-radius: 8px;
         }
         QPushButton#btn_ai_main:hover {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -697,10 +696,11 @@ class ScreenshotAICapsule(QWidget):
         self.btn_ai.setToolTip("AI 分析")
         self.btn_ai.setObjectName("btn_ai_main")
         self.btn_ai.clicked.connect(self._on_ai_clicked)
-        self._main_layout.addWidget(self.btn_ai)
+        self._main_layout.addWidget(self.btn_ai, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # 展开后的输入框容器（使用堆叠布局放置按钮在输入框内）
         self.expanded_container = QWidget()
+        self.expanded_container.setFixedHeight(36)
         self.expanded_layout = QHBoxLayout(self.expanded_container)
         self.expanded_layout.setContentsMargins(0, 0, 0, 0)
         self.expanded_layout.setSpacing(0)
@@ -709,7 +709,7 @@ class ScreenshotAICapsule(QWidget):
         self.input_container = QWidget()
         self.input_container.setObjectName("input_container")
         input_container_layout = QHBoxLayout(self.input_container)
-        input_container_layout.setContentsMargins(12, 4, 4, 4)
+        input_container_layout.setContentsMargins(8, 3, 4, 3)
         input_container_layout.setSpacing(4)
         
         # 输入框
@@ -739,7 +739,7 @@ class ScreenshotAICapsule(QWidget):
         self.expanded_layout.addWidget(self.input_container, 1)
         
         self.expanded_container.hide()
-        self._main_layout.addWidget(self.expanded_container)
+        self._main_layout.addWidget(self.expanded_container, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # ─── 下拉列表（自绘圆角悬浮卡片）───
         self._dropdown = _DropdownPanel(self.parent() if self.parent() else self)
@@ -761,12 +761,12 @@ class ScreenshotAICapsule(QWidget):
         self.setStyleSheet("""
             ScreenshotAICapsule {
                 background-color: rgba(255, 255, 255, 240);
-                border-radius: 24px;
+                border-radius: 12px;
             }
             QPushButton {
                 background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
             }
             QPushButton:hover {
                 background-color: rgba(0, 0, 0, 0.08);
@@ -778,7 +778,7 @@ class ScreenshotAICapsule(QWidget):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 rgba(99, 102, 241, 0.9),
                     stop:1 rgba(139, 92, 246, 0.9));
-                border-radius: 18px;
+                border-radius: 8px;
             }
             QPushButton#btn_ai_main:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -788,7 +788,7 @@ class ScreenshotAICapsule(QWidget):
             QWidget#input_container {
                 background-color: rgba(255, 255, 255, 0.9);
                 border: 1px solid rgba(0, 0, 0, 0.1);
-                border-radius: 16px;
+                border-radius: 8px;
             }
             QWidget#input_container:focus-within {
                 border: 1px solid rgba(99, 102, 241, 0.5);
@@ -804,7 +804,7 @@ class ScreenshotAICapsule(QWidget):
             }
             QPushButton#btn_mode_text {
                 background-color: rgba(99, 102, 241, 0.15);
-                border-radius: 12px;
+                border-radius: 8px;
                 font-size: 11px;
                 font-weight: 500;
                 color: rgba(99, 102, 241, 0.9);
@@ -815,7 +815,7 @@ class ScreenshotAICapsule(QWidget):
             }
             QPushButton#btn_mode_image {
                 background-color: rgba(236, 72, 153, 0.15);
-                border-radius: 12px;
+                border-radius: 8px;
                 font-size: 11px;
                 font-weight: 500;
                 color: rgba(236, 72, 153, 0.9);
@@ -829,6 +829,7 @@ class ScreenshotAICapsule(QWidget):
         
         self._dropdown_selected_index = -1
         self.input_field.installEventFilter(self)
+        self.input_container.installEventFilter(self)
         
         self.setFixedHeight(self._height)
         self.setFixedWidth(self.COLLAPSED_WIDTH)
@@ -859,7 +860,7 @@ class ScreenshotAICapsule(QWidget):
             self._dropdown.hide()
     
     def eventFilter(self, obj, event):
-        """拦截输入框的键盘事件，支持上下键选择下拉列表"""
+        """拦截输入框的键盘事件，支持上下键选择下拉列表；转发容器点击到输入框"""
         if obj is self.input_field and event.type() == QEvent.Type.KeyPress:
             if not self._dropdown.isVisible():
                 return super().eventFilter(obj, event)
@@ -885,6 +886,10 @@ class ScreenshotAICapsule(QWidget):
                 self._dropdown.hide()
                 self._dropdown_selected_index = -1
                 return True
+        # 点击 input_container 的 padding 区域时聚焦输入框（点击落在子控件上时由子控件自行处理）
+        if obj is self.input_container and event.type() == QEvent.Type.MouseButtonPress:
+            self.input_field.setFocus()
+            return True
         return super().eventFilter(obj, event)
     
     def _update_dropdown_highlight(self, visible_items):
@@ -1077,14 +1082,18 @@ class ScreenshotAICapsule(QWidget):
             # 不重置模式，保持用户选择
     
     def _update_enter_hint(self, text: str):
-        """输入框有文字时显示 Enter 键发送提示"""
+        """输入框有文字时显示 Enter 键发送提示，通过文本边距避免与输入文字重叠"""
         if text.strip():
             self._enter_hint.adjustSize()
-            x = self.input_field.width() - self._enter_hint.width() - 60
+            hint_w = self._enter_hint.width()
+            # 右侧预留提示宽度 + 间距，防止输入文字延伸到提示下方
+            self.input_field.setTextMargins(0, 0, hint_w + 8, 0)
+            x = self.input_field.width() - hint_w - 4
             y = (self.input_field.height() - self._enter_hint.height()) // 2
             self._enter_hint.move(max(0, x), y)
             self._enter_hint.show()
         else:
+            self.input_field.setTextMargins(0, 0, 0, 0)
             self._enter_hint.hide()
     
     def is_expanded(self) -> bool:
@@ -1094,14 +1103,6 @@ class ScreenshotAICapsule(QWidget):
         """收缩状态下扩大点击区域：容器任意位置点击等同于点击 AI 按钮；
         展开状态下也拦截事件，防止穿透到底层 overlay"""
         if not self._is_expanded and event.button() == Qt.MouseButton.LeftButton:
-            # 收缩状态是圆形，忽略圆角外的四角区域点击
-            center = self.rect().center()
-            dx = event.position().x() - center.x()
-            dy = event.position().y() - center.y()
-            radius = min(self.width(), self.height()) / 2
-            if dx * dx + dy * dy > radius * radius:
-                event.ignore()
-                return
             self.btn_ai.click()
             return
         event.accept()  # 展开状态下也消费事件，防止穿透到 overlay
@@ -1158,10 +1159,11 @@ class ScreenshotToolbar(QWidget):
         self.btn_expand.setToolTip("展开工具栏")
         self.btn_expand.clicked.connect(self._on_expand_clicked)
         self.btn_expand.hide()
-        self._main_layout.addWidget(self.btn_expand)
+        self._main_layout.addWidget(self.btn_expand, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # 工具按钮容器
         self.buttons_container = QWidget()
+        self.buttons_container.setFixedHeight(36)
         self.buttons_layout = QHBoxLayout(self.buttons_container)
         self.buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.buttons_layout.setSpacing(4)
@@ -1251,17 +1253,17 @@ class ScreenshotToolbar(QWidget):
                 btn.setIconSize(QSize(18, 18))
             self.buttons_layout.addWidget(btn)
         
-        self._main_layout.addWidget(self.buttons_container)
+        self._main_layout.addWidget(self.buttons_container, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.setStyleSheet("""
             ScreenshotToolbar {
                 background-color: rgba(255, 255, 255, 230);
-                border-radius: 24px;
+                border-radius: 12px;
             }
             QPushButton {
                 background-color: transparent;
                 border: none;
-                border-radius: 18px;
+                border-radius: 8px;
             }
             QPushButton:hover {
                 background-color: rgba(0, 0, 0, 0.08);
@@ -1353,6 +1355,8 @@ class ScreenshotToolbar(QWidget):
         
         if self._color_panel and self._color_panel.isVisible():
             self._color_panel.hide()
+        
+        # 收缩时先隐藏内容，宽度动画自然收窄
         self.buttons_container.hide()
         self.btn_expand.show()
         
@@ -1388,14 +1392,6 @@ class ScreenshotToolbar(QWidget):
         """收缩状态下扩大点击区域：容器任意位置点击等同于点击展开按钮；
         展开状态下也拦截事件，防止穿透到底层 overlay"""
         if self._is_collapsed and event.button() == Qt.MouseButton.LeftButton:
-            # 收缩状态是圆形，忽略圆角外的四角区域点击
-            center = self.rect().center()
-            dx = event.position().x() - center.x()
-            dy = event.position().y() - center.y()
-            radius = min(self.width(), self.height()) / 2
-            if dx * dx + dy * dy > radius * radius:
-                event.ignore()
-                return
             self.btn_expand.click()
             return
         event.accept()  # 展开状态下也消费事件，防止穿透到 overlay
@@ -1508,6 +1504,13 @@ class NumberAnnotationPanel(QWidget):
         """添加序号注释输入框"""
         if number in self._text_edits:
             return
+        
+        # 清理可能残留的同名容器（deleteLater 延迟删除可能导致旧容器仍留在控件树中）
+        stale = self.content_widget.findChild(QWidget, f"annotation_container_{number}")
+        if stale:
+            self.content_layout.removeWidget(stale)
+            stale.setParent(None)
+            stale.deleteLater()
         
         # 创建输入框容器（极简无背景）
         container = QWidget()
@@ -1684,6 +1687,8 @@ class NumberAnnotationPanel(QWidget):
         # 找到并删除容器
         container = self.content_widget.findChild(QWidget, f"annotation_container_{number}")
         if container:
+            self.content_layout.removeWidget(container)
+            container.setParent(None)  # 立即从控件树分离，避免 deleteLater 延迟导致 findChild 冲突和重复显示
             container.deleteLater()
         
         del self._text_edits[number]
@@ -1721,23 +1726,54 @@ class NumberAnnotationPanel(QWidget):
         if getattr(self, "_annotation_scroll", None) is not None:
             self._annotation_scroll.ensureWidgetVisible(target)
 
-    def renumber(self, old_to_new: dict[int, int]):
-        """重新编号（当序号点被删除后调整）"""
-        # 保存旧数据
-        old_annotations = self._annotations.copy()
-        old_images = self._images.copy()
+    def renumber(self, old_to_new: dict[int, int], deleted_number: int = -1):
+        """重新编号（当序号点被删除后调整）
         
-        # 清空所有
-        for number in list(self._text_edits.keys()):
-            self.remove_annotation(number)
+        old_to_new: {旧编号: 新编号}，仅包含发生变化的条目。
+        deleted_number: 被删除的序号点编号（-1 表示无删除）。
         
-        # 按新编号重建
-        for old_num, new_num in sorted(old_to_new.items(), key=lambda x: x[1]):
+        策略：全量保存所有注释内容（文字+图片）→ 全量清空 → 按正确编号顺序全量重建。
+        避免局部删除/重建的时序冲突和 findChild 残留问题。
+        """
+        if not old_to_new and deleted_number < 0:
+            return
+        
+        # 1) 全量保存所有现有注释内容 {编号: (text, image)}
+        all_saved = {}
+        for num in list(self._text_edits.keys()):
+            text = self._annotations.get(num, "")
+            image = self._images.get(num, None)
+            all_saved[num] = (text, image)
+        
+        # 1.5) Fallback: 如果 old_to_new 为空但有删除，自主推导映射
+        #      原理：旧编号排序后去掉被删的，剩余按位置从1开始编号
+        if not old_to_new and deleted_number > 0:
+            old_nums_sorted = sorted(n for n in all_saved.keys() if n != deleted_number)
+            old_to_new = {old: new for new, old in enumerate(old_nums_sorted, 1)}
+        
+        # 2) 计算重建后的编号→内容映射
+        #    - 被删除编号: 不重建
+        #    - 在 old_to_new 中的编号: 用新编号
+        #    - 其他编号: 保持不变
+        rebuild = {}  # {new_num: (text, image)}
+        for old_num, (text, image) in all_saved.items():
+            if old_num == deleted_number:
+                continue  # 被删除的，跳过
+            new_num = old_to_new.get(old_num, old_num)
+            rebuild[new_num] = (text, image)
+        
+        # 3) 全量清空当前侧栏
+        self.clear()
+        
+        # 4) 按编号升序全量重建
+        for new_num in sorted(rebuild.keys()):
+            text, image = rebuild[new_num]
             self.add_annotation(new_num)
-            if old_num in old_annotations:
-                self._text_edits[new_num].setPlainText(old_annotations[old_num])
-            if old_num in old_images:
-                self._set_image(new_num, old_images[old_num])
+            if text:
+                # setPlainText 触发 textChanged → _on_text_changed 自动同步 _annotations + adjust_height
+                self._text_edits[new_num].setPlainText(text)
+            if image:
+                self._set_image(new_num, image)
     
     def sync_with_marks(self, number_dots: list):
         """与画布上的序号点同步"""

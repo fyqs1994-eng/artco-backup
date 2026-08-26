@@ -26,7 +26,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap
 
 
 from version import APP_VERSION, APP_NAME
-from config import ai_config, get_bundle_dir
+from config import ai_config, get_bundle_dir, appearance_config
 from ui.theme import MENU_STYLE
 
 from database import init_database, add_record
@@ -54,6 +54,23 @@ class CapsuleWidget(QWidget):
     update_check_result = Signal(bool, object)  # 检查更新结果
     update_check_timeout = Signal()  # 检查更新超时
     
+    def _build_bg_css(self, border_radius: int = None, border: str = None, border_color: str = None) -> str:
+        """从 appearance_config 动态生成 #container 背景样式"""
+        if border_radius is None:
+            border_radius = appearance_config.get_border_radius()
+        if border is None:
+            border = appearance_config.get_border_css()
+        if border_color:
+            border = f"1px solid {border_color}"
+
+        bg = appearance_config.get_background_css(border_radius=border_radius)
+        return f"""
+            #container {{
+                {bg}
+                border-radius: {border_radius}px;
+                border: {border};
+            }}"""
+
     def __init__(self):
         super().__init__()
         self._breathing_value = 0.0
@@ -149,25 +166,25 @@ class CapsuleWidget(QWidget):
         r2, g2, b2 = colorsys.hsv_to_rgb(hue2, 0.35, 0.92)
         r2, g2, b2 = int(r2 * 255), int(g2 * 255), int(b2 * 255)
         
+        bg_css = self._build_bg_css()
+        # 转换为大括号格式（f-string 兼容）
+        bg_css_f = bg_css.replace("{", "{{").replace("}", "}}")
+        
         self.container.setStyleSheet(f"""
-            #container {{
-                background-color: rgba(245, 245, 245, 0.95);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.8);
-            }}
+            {bg_css_f}
             QPushButton#btn_screenshot {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 rgba({r}, {g}, {b}, 0.9),
                     stop:1 rgba({r2}, {g2}, {b2}, 0.9));
                 border: 1px solid rgba(255, 255, 255, 0.35);
-                border-radius: 16px;
+                border-radius: 8px;
                 color: rgba(255, 255, 255, 0.95);
             }}
 
             QPushButton#btn_archive {{
                 background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
             }}
             QPushButton#btn_archive:hover {{ background-color: rgba(0, 0, 0, 0.08); }}
             QPushButton#btn_archive:pressed {{ background-color: rgba(0, 0, 0, 0.12); }}
@@ -388,20 +405,15 @@ class CapsuleWidget(QWidget):
         self.btn_screenshot.clicked.connect(self.start_screenshot)
         self.btn_screenshot.setToolTip("截图 (快捷键)")
         
-        self.container.setStyleSheet("""
-            #container {
-                background-color: rgba(245, 245, 245, 0.95);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.8);
-            }
+        self.container.setStyleSheet(self._build_bg_css() + """
             QPushButton#btn_screenshot {
-                background-color: rgba(232, 232, 232, 0.9);
+                background-color: transparent;
                 border: none;
                 border-radius: 16px;
                 color: #555555;
             }
-            QPushButton#btn_screenshot:hover { background-color: rgba(216, 216, 216, 0.95); }
-            QPushButton#btn_screenshot:pressed { background-color: rgba(200, 200, 200, 1.0); }
+QPushButton#btn_screenshot:hover { background-color: rgba(0, 0, 0, 0.08); }
+QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             QPushButton#btn_archive {
                 background-color: transparent;
                 border: none;
@@ -898,7 +910,7 @@ class CapsuleWidget(QWidget):
         self.container = QWidget(self)
         self.container.setObjectName("container")
         self.container.setAcceptDrops(True)  # container 也接受拖放，防止事件被子控件吞掉
-        self.container.setFixedSize(136, 40)  # 增加宽度以容纳拖动手柄
+        self.container.setFixedSize(116, 40)  # 圆角矩形浮窗，减小宽度
         
         layout = QHBoxLayout(self.container)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -909,7 +921,7 @@ class CapsuleWidget(QWidget):
         self.btn_screenshot.setIcon(qta.icon('mdi6.crop', color='#666666'))
         self.btn_screenshot.setIconSize(QSize(18, 18))
         self.btn_screenshot.setObjectName("btn_screenshot")
-        self.btn_screenshot.setFixedSize(48, 32)
+        self.btn_screenshot.setFixedSize(42, 32)
         self.btn_screenshot.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_screenshot.setToolTip("截图 (快捷键)")
         self.btn_screenshot.clicked.connect(self.start_screenshot)
@@ -918,7 +930,7 @@ class CapsuleWidget(QWidget):
         # 拖动手柄（中间）
         self.drag_handle = QLabel()
         self.drag_handle.setObjectName("drag_handle")
-        self.drag_handle.setFixedSize(24, 32)
+        self.drag_handle.setFixedSize(20, 32)
         self.drag_handle.setCursor(Qt.CursorShape.SizeAllCursor)
         self.drag_handle.setToolTip("拖动移动")
         self.drag_handle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -932,7 +944,7 @@ class CapsuleWidget(QWidget):
         self.btn_archive.setIcon(qta.icon('mdi6.archive', color='#666666'))
         self.btn_archive.setIconSize(QSize(16, 16))
         self.btn_archive.setObjectName("btn_archive")
-        self.btn_archive.setFixedSize(48, 32)
+        self.btn_archive.setFixedSize(42, 32)
         self.btn_archive.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_archive.setToolTip("归档记录")
         self.btn_archive.clicked.connect(self._open_archive)
@@ -946,51 +958,41 @@ class CapsuleWidget(QWidget):
             child.setAcceptDrops(True)
             child.installEventFilter(self)
 
-        self._normal_style = """
-            #container {
-                background-color: rgba(245, 245, 245, 0.95);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.8);
-            }
+        self._normal_style = self._build_bg_css() + """
             #drag_handle {
                 background-color: transparent;
             }
             QPushButton#btn_screenshot {
-                background-color: rgba(232, 232, 232, 0.9);
+                background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
                 color: #555555;
             }
-            QPushButton#btn_screenshot:hover { background-color: rgba(216, 216, 216, 0.95); }
-            QPushButton#btn_screenshot:pressed { background-color: rgba(200, 200, 200, 1.0); }
+QPushButton#btn_screenshot:hover { background-color: rgba(0, 0, 0, 0.08); }
+QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             QPushButton#btn_archive {
                 background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
             }
             QPushButton#btn_archive:hover { background-color: rgba(0, 0, 0, 0.08); }
             QPushButton#btn_archive:pressed { background-color: rgba(0, 0, 0, 0.12); }
         """
         
-        self._dragging_style = """
-            #container {
-                background-color: rgba(245, 245, 245, 0.95);
-                border-radius: 20px;
-                border: 1px solid rgba(100, 150, 255, 0.6);
-            }
+        self._dragging_style = self._build_bg_css(border="1px solid rgba(100, 150, 255, 0.6)") + """
             #drag_handle {
                 background-color: transparent;
             }
             QPushButton#btn_screenshot {
-                background-color: rgba(232, 232, 232, 0.9);
+                background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
                 color: #555555;
             }
             QPushButton#btn_archive {
                 background-color: transparent;
                 border: none;
-                border-radius: 16px;
+                border-radius: 8px;
             }
         """
         
@@ -1002,7 +1004,7 @@ class CapsuleWidget(QWidget):
         shadow.setOffset(0, 3)
         self.container.setGraphicsEffect(shadow)
 
-        self.setFixedSize(156, 60)  # 外框尺寸（包含阴影空间）
+        self.setFixedSize(136, 60)  # 外框尺寸（包含阴影空间）
         self.container.move(10, 10)
 
         screen = QGuiApplication.primaryScreen().geometry()
@@ -1117,9 +1119,37 @@ class CapsuleWidget(QWidget):
         
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.hotkey_changed.connect(self._on_hotkey_changed)
+        self._settings_dialog._appearance_preview_callback = self._refresh_appearance
         self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._settings_dialog.destroyed.connect(lambda: setattr(self, '_settings_dialog', None))
         self._settings_dialog.show()
+    
+    def _refresh_appearance(self):
+        """从 appearance_config 刷新浮窗样式"""
+        self._normal_style = self._build_bg_css() + """
+            #drag_handle { background-color: transparent; }
+            QPushButton#btn_screenshot {
+                background-color: transparent; border: none; border-radius: 8px; color: #555555;
+            }
+            QPushButton#btn_screenshot:hover { background-color: rgba(0, 0, 0, 0.08); }
+            QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
+            QPushButton#btn_archive {
+                background-color: transparent; border: none; border-radius: 8px;
+            }
+            QPushButton#btn_archive:hover { background-color: rgba(0, 0, 0, 0.08); }
+            QPushButton#btn_archive:pressed { background-color: rgba(0, 0, 0, 0.12); }
+        """
+        self._dragging_style = self._build_bg_css(border="1px solid rgba(100, 150, 255, 0.6)") + """
+            #drag_handle { background-color: transparent; }
+            QPushButton#btn_screenshot {
+                background-color: transparent; border: none; border-radius: 8px; color: #555555;
+            }
+            QPushButton#btn_archive {
+                background-color: transparent; border: none; border-radius: 8px;
+            }
+        """
+        if not self._is_processing:
+            self.container.setStyleSheet(self._normal_style)
     
     def _open_prompt_settings(self):
         # 统一入口：在设置面板内管理 Prompt
@@ -1513,7 +1543,9 @@ class CapsuleWidget(QWidget):
         if active:
             self.container.setStyleSheet("""
                 #container {
-                    background-color: rgba(230, 243, 255, 0.98);
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 rgba(230, 243, 255, 0.98),
+                        stop:1 rgba(200, 225, 255, 0.95));
                     border-radius: 20px;
                     border: 2px solid #007aff;
                 }
@@ -1525,7 +1557,9 @@ class CapsuleWidget(QWidget):
         """归档成功后短暂闪烁反馈"""
         self.container.setStyleSheet("""
             #container {
-                background-color: rgba(220, 245, 220, 0.98);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(220, 245, 220, 0.98),
+                    stop:1 rgba(200, 240, 210, 0.95));
                 border-radius: 20px;
                 border: 2px solid #34c759;
             }

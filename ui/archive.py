@@ -935,7 +935,7 @@ class ClipboardHistoryManager:
     """剪贴板历史管理器（单例）"""
     _instance = None
     _items: List[ClipboardItem] = []
-    _max_items = 20
+    _max_items = 40
     _listeners: List[callable] = []
     
     @classmethod

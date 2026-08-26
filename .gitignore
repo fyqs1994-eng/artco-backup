@@ -57,6 +57,7 @@ extracted/
 # Artco specific
 *.exe
 package-lock.json
+appearance.json
 ArtcoShellExtension/bin/
 ArtcoShellExtension/obj/
 shell_ext/bin/

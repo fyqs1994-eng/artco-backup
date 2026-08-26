@@ -14,13 +14,14 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QScrollArea, QFrame,
     QComboBox, QMenu, QStackedWidget, QToolButton,
     QListWidget, QListWidgetItem, QSizePolicy,
-    QProgressDialog,
+    QProgressDialog, QFileDialog, QSlider, QSpinBox, QGridLayout,
+    QGraphicsDropShadowEffect,
 )
 from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QKeySequence, QColor
 import qtawesome as qta
 
-from config import AI_MODELS, ai_config, wecom_config, ps_config
+from config import AI_MODELS, ai_config, wecom_config, ps_config, appearance_config, PRESET_SCHEMES
 from utils import hotkey_manager
 from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
@@ -107,6 +108,80 @@ _ROW_GAP     = 10
 _BLOCK_GAP   = 24
 
 
+class _CapsulePreview(QWidget):
+    """浮窗预览组件 — 与桌面浮窗同尺寸（116×40），带截图/手柄/归档图标"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("capsule_preview")
+        self.setFixedSize(136, 60)  # 外框（含阴影空间），与 main.py 一致
+
+        self._container = QWidget(self)
+        self._container.setObjectName("preview_container")
+        self._container.setFixedSize(116, 40)
+        self._container.move(10, 10)
+
+        layout = QHBoxLayout(self._container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # 截图按钮
+        btn_shot = QPushButton()
+        btn_shot.setIcon(qta.icon('mdi6.crop', color='#666666'))
+        btn_shot.setIconSize(QSize(18, 18))
+        btn_shot.setFixedSize(42, 32)
+        btn_shot.setEnabled(False)
+        layout.addWidget(btn_shot)
+
+        # 拖动手柄
+        handle = QLabel()
+        handle.setFixedSize(20, 32)
+        handle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        handle.setPixmap(qta.icon('mdi6.drag-vertical', color='#888888').pixmap(QSize(20, 20)))
+        layout.addWidget(handle)
+
+        # 归档按钮
+        btn_arch = QPushButton()
+        btn_arch.setIcon(qta.icon('mdi6.archive', color='#666666'))
+        btn_arch.setIconSize(QSize(16, 16))
+        btn_arch.setFixedSize(42, 32)
+        btn_arch.setEnabled(False)
+        layout.addWidget(btn_arch)
+
+        # 阴影效果
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 40))
+        shadow.setOffset(0, 3)
+        self._container.setGraphicsEffect(shadow)
+
+        self.refresh_background()
+
+    def refresh_background(self):
+        """从 appearance_config 刷新背景样式"""
+        border_radius = appearance_config.get_border_radius()
+        border = appearance_config.get_border_css()
+        bg = appearance_config.get_background_css(border_radius=border_radius)
+
+        # 按钮基础样式
+        btn_style = """
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                border-radius: 8px;
+            }
+        """
+
+        self._container.setStyleSheet(f"""
+            #preview_container {{
+                {bg}
+                border-radius: {border_radius}px;
+                border: {border};
+            }}
+            {btn_style}
+        """)
+
+
 class _PromptRow(QWidget):
     """Prompt list row: show checkbox on hover, always show if checked."""
 
@@ -170,6 +245,7 @@ class SettingsDialog(QDialog):
             ("mdi6.creation-outline",     "AI 设置"),
             ("mdi6.text-box-edit-outline", "Prompt"),
             ("mdi6.keyboard-outline",      "快捷键"),
+            ("mdi6.palette-outline",       "外观"),
             ("mdi6.tune-vertical",         "通用"),
         ]
         self._tab_btns: list[QToolButton] = []
@@ -198,6 +274,7 @@ class SettingsDialog(QDialog):
         self._pages.addWidget(self._build_ai_page())
         self._pages.addWidget(self._build_prompt_page())
         self._pages.addWidget(self._build_hotkey_page())
+        self._pages.addWidget(self._build_appearance_page())
         self._pages.addWidget(self._build_general_page())
         root.addWidget(self._pages, 1)
 
@@ -231,7 +308,7 @@ class SettingsDialog(QDialog):
             b.setChecked(i == idx)
 
     def show_tab(self, tab_id: str):
-        mapping = {'ai': 0, 'prompt': 1, 'hotkey': 2, 'general': 3, 'wecom': 0}
+        mapping = {'ai': 0, 'prompt': 1, 'hotkey': 2, 'appearance': 3, 'general': 4, 'wecom': 0}
         self._switch_tab(mapping.get(tab_id, 0))
 
     # ══════════════════════════════════════════════════════
@@ -574,7 +651,132 @@ class SettingsDialog(QDialog):
         return page
 
     # ══════════════════════════════════════════════════════
-    #  PAGE 3 — 通用
+    #  PAGE 3 — 外观（浮窗背景自定义）
+    # ══════════════════════════════════════════════════════
+
+    def _build_appearance_page(self):
+        from qfluentwidgets import PushButton, PrimaryPushButton
+
+        page, lay = self._scroll_page()
+
+        # ── section: 浮窗背景 ──
+        lay.addWidget(self._section("浮窗背景"))
+        lay.addSpacing(_SEC_GAP)
+
+        # ── 主区域：QGridLayout 保证两行跨列对齐 ──
+        grid = QGridLayout()
+        grid.setVerticalSpacing(8)
+        grid.setHorizontalSpacing(24)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Row 0 — Col 0: 地址栏（top margin 10px 补偿右侧浮窗阴影留白）
+        self._appearance_img_edit = QLineEdit()
+        self._appearance_img_edit.setPlaceholderText("选择图片文件作为浮窗背景…")
+        self._appearance_img_edit.setFixedHeight(_ROW_H)
+        cur_cfg = appearance_config.get_config()
+        cur_type = cur_cfg.get("type", "gradient")
+        cur_img = appearance_config.get("image_path", "")
+        if cur_type == "image":
+            self._appearance_img_edit.setText(cur_img)
+
+        addr_wrap = QWidget()
+        addr_lay = QVBoxLayout(addr_wrap)
+        addr_lay.setContentsMargins(0, 10, 0, 0)   # top=10 对齐浮窗可视区
+        addr_lay.addWidget(self._appearance_img_edit)
+        grid.addWidget(addr_wrap, 0, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Row 0 — Col 1: 浮窗预览（136×60，含阴影留白）
+        self._appearance_preview = _CapsulePreview()
+        grid.addWidget(self._appearance_preview, 0, 1, Qt.AlignmentFlag.AlignTop)
+
+        # Row 1 — Col 0: 浏览 / 清除按钮
+        btn_widget = QWidget()
+        btn_row = QHBoxLayout(btn_widget)
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(8)
+        browse_btn = PushButton("浏览…")
+        browse_btn.setFixedHeight(_ROW_H)
+        browse_btn.setFixedWidth(80)
+        browse_btn.clicked.connect(self._browse_image)
+        btn_row.addWidget(browse_btn)
+
+        clear_btn = PushButton("清除图片")
+        clear_btn.setFixedHeight(_ROW_H)
+        clear_btn.setFixedWidth(80)
+        clear_btn.clicked.connect(self._clear_appearance_image)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch()
+        grid.addWidget(btn_widget, 1, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Row 1 — Col 1: 预览效果按钮
+        preview_btn_wrap = QWidget()
+        pv_lay = QVBoxLayout(preview_btn_wrap)
+        pv_lay.setContentsMargins(0, 0, 0, 0)
+        preview_btn = PrimaryPushButton("预览效果")
+        preview_btn.setFixedHeight(_ROW_H)
+        preview_btn.setFixedWidth(100)
+        preview_btn.clicked.connect(self._preview_appearance)
+        pv_lay.addWidget(preview_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(preview_btn_wrap, 1, 1, Qt.AlignmentFlag.AlignTop)
+
+        lay.addLayout(grid)
+        lay.addSpacing(8)
+
+        tip = self._tip("预览效果与桌面浮窗保持一致。选择图片后点击预览即可应用到桌面浮窗。")
+        lay.addWidget(tip)
+        lay.addStretch()
+
+        # 初始更新预览
+        self._update_capsule_preview()
+        return page
+
+    @staticmethod
+    def _wrap_hbox(layout: QHBoxLayout) -> QWidget:
+        """将一个 QHBoxLayout 包装为 QWidget，便于嵌入 _form_row"""
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    def _clear_appearance_image(self):
+        """清除图片背景，恢复为渐变"""
+        self._appearance_img_edit.clear()
+        appearance_config.set_gradient(
+            appearance_config.get("direction", "diagonal"),
+            appearance_config.get("stops", [])
+        )
+        self._update_capsule_preview()
+
+    def _browse_image(self):
+        """浏览选择图片文件"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择背景图片", "", "图片文件 (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if path:
+            self._appearance_img_edit.setText(path)
+
+    def _preview_appearance(self):
+        """预览当前外观设置 — 应用到桌面浮窗"""
+        img_path = self._appearance_img_edit.text().strip()
+        if img_path:
+            appearance_config.set_image(img_path)
+        else:
+            appearance_config.set_gradient(
+                appearance_config.get("direction", "diagonal"),
+                appearance_config.get("stops", [])
+            )
+        # 更新设置页内的预览
+        self._update_capsule_preview()
+        # 发信号通知桌面浮窗刷新
+        if hasattr(self, '_appearance_preview_callback'):
+            self._appearance_preview_callback()
+
+    def _update_capsule_preview(self):
+        """更新设置页内的浮窗预览"""
+        if hasattr(self, '_appearance_preview'):
+            self._appearance_preview.refresh_background()
+
+    # ══════════════════════════════════════════════════════
+    #  PAGE 4 — 通用
     # ══════════════════════════════════════════════════════
 
     def _build_general_page(self):

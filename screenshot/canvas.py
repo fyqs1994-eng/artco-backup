@@ -26,6 +26,7 @@ class EditorCanvas(QWidget):
     scale_changed = Signal(float)
     pan_requested = Signal(int, int)  # delta_x, delta_y
     number_dots_changed = Signal()  # 序号点增删时触发
+    number_dots_renumbered = Signal(dict, int)  # 序号点重编号时触发，携带 ({old: new}, deleted_number)
     number_dot_clicked = Signal(int)  # 点击序号点时触发
 
     
@@ -121,10 +122,13 @@ class EditorCanvas(QWidget):
             # 撤销添加 -> 删除
             mark = data
             if mark in self.marks:
+                deleted_number = None
+                if isinstance(mark, NumberDot):
+                    deleted_number = mark.number
                 self.marks.remove(mark)
                 # 如果是序号点，需要重新编号
                 if isinstance(mark, NumberDot):
-                    self._renumber_dots()
+                    self._renumber_dots(deleted_number)
         elif action == 'delete':
             # 撤销删除 -> 恢复
             mark, index = data
@@ -152,12 +156,21 @@ class EditorCanvas(QWidget):
         self._deselect_all()
         self.update()
     
-    def _renumber_dots(self):
-        """重新编号所有序号点"""
+    def _renumber_dots(self, deleted_number: int = None):
+        """重新编号所有序号点
+        
+        deleted_number: 被删除的序号点编号（如果有），用于通知侧栏清理对应注释
+        """
         dots = [m for m in self.marks if isinstance(m, NumberDot)]
+        old_to_new = {}
         for i, dot in enumerate(dots, 1):
-            dot.number = i
+            if dot.number != i:
+                old_to_new[dot.number] = i
+                dot.number = i
         self.number_counter = len(dots) + 1
+        if old_to_new or deleted_number is not None:
+            # 有编号变化或删除，先发重编号信号（携带映射和被删编号），再发通用变化信号
+            self.number_dots_renumbered.emit(old_to_new, deleted_number if deleted_number else -1)
         self.number_dots_changed.emit()  # 通知序号点变化
     
     def set_mark_color(self, color: QColor):
@@ -198,10 +211,13 @@ class EditorCanvas(QWidget):
         if self.selected_mark and self.selected_mark in self.marks:
             index = self.marks.index(self.selected_mark)
             self._push_undo('delete', (self.selected_mark, index))
+            deleted_number = None
+            if isinstance(self.selected_mark, NumberDot):
+                deleted_number = self.selected_mark.number
             self.marks.remove(self.selected_mark)
             # 如果删除的是序号点，重新编号
             if isinstance(self.selected_mark, NumberDot):
-                self._renumber_dots()
+                self._renumber_dots(deleted_number)
             self.selected_mark = None
             self.update()
     
@@ -211,10 +227,13 @@ class EditorCanvas(QWidget):
         if mark:
             index = self.marks.index(mark)
             self._push_undo('delete', (mark, index))
+            deleted_number = None
+            if isinstance(mark, NumberDot):
+                deleted_number = mark.number
             self.marks.remove(mark)
             # 如果删除的是序号点，重新编号
             if isinstance(mark, NumberDot):
-                self._renumber_dots()
+                self._renumber_dots(deleted_number)
             self.update()
     
     def paintEvent(self, event):

@@ -245,7 +245,8 @@ class ScreenshotOverlay(QWidget):
         self.is_moving = False
         self.is_resizing = False
         self.resize_handle = None
-        self.handle_size = 8
+        self.handle_size = 8          # 锚点视觉大小
+        self._hit_padding = 8         # 锚点命中判定额外扩展（每侧），实际命中区 = (8+8*2)=24px
         
         # 预分配 handles 字典
         self.handles = {
@@ -439,6 +440,20 @@ class ScreenshotOverlay(QWidget):
         self.handles['bottom_left'].setRect(left - hs, bottom - hs, s, s)
         self.handles['left'].setRect(left - hs, cy - hs, s, s)
 
+    def _hit_handle_at(self, pos: QPoint) -> str | None:
+        """检查 pos 是否落在某个锚点的扩展命中区域内，返回 handle 名称或 None。
+        
+        视觉锚点仅 8×8，直接用 handles 判定极易误操作。
+        此方法在视觉矩形四周各扩展 _hit_padding 像素，使实际命中区域达到 24×24。
+        """
+        p = self._hit_padding
+        for handle, rect in self.handles.items():
+            if rect.isNull():
+                continue
+            expanded = rect.adjusted(-p, -p, p, p)
+            if expanded.contains(pos):
+                return handle
+        return None
 
     def _ensure_ai_capsule(self):
         """懒加载 AI 胶囊"""
@@ -500,7 +515,7 @@ class ScreenshotOverlay(QWidget):
                     background: rgba(255, 255, 255, 0.98);
                     color: #1f2937;
                     border: 2px solid {border};
-                    border-radius: 14px;
+                    border-radius: 6px;
                     padding: 0 10px;
                     font-size: 12px;
                     font-weight: 500;
@@ -712,6 +727,11 @@ class ScreenshotOverlay(QWidget):
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif tool == 'text':
             self.setCursor(Qt.CursorShape.IBeamCursor)
+            # 文本工具激活时释放键盘抢占，确保 IME Shift 切换在整个文本工具使用期间都可用
+            self._release_keyboard_for_ime()
+        # 从文本工具切换到其他工具时恢复键盘抢占
+        if tool != 'text' and not (self.ai_capsule and self.ai_capsule.is_expanded()):
+            self.grabKeyboard()
     
     def _on_mark_color_changed(self, color):
         """标记颜色变化"""
@@ -730,6 +750,9 @@ class ScreenshotOverlay(QWidget):
     def _restore_keyboard_grab_after_ime(self):
         """结束 IME 相关输入后恢复抢占，防止按键穿透到底层；AI 输入框展开时保持释放。"""
         if self.ai_capsule and self.ai_capsule.is_expanded() and self.ai_capsule.input_field.hasFocus():
+            return
+        # 文本工具激活时不重新抢占键盘，确保 IME 的 Shift 中英切换在两次输入之间仍然可用
+        if self._mark_tool == 'text':
             return
         self.grabKeyboard()
 
@@ -1060,15 +1083,15 @@ class ScreenshotOverlay(QWidget):
             return
         
         # 选区锚点优先级最高：即使当前选中标记工具，也先响应调整选区
-        for handle, rect in self.handles.items():
-            if not rect.isNull() and rect.contains(pos):
-                self.is_resizing = True
-                self.resize_handle = handle
-                # 拖拽边锚点 → 自动解除比例锁定（用户意图是自由调整单边）
-                if self._aspect_locked and handle in ('top', 'bottom', 'left', 'right'):
-                    self._unlock_aspect_ratio()
-                self._hide_toolbar_and_capsule()
-                return
+        hit_handle = self._hit_handle_at(pos)
+        if hit_handle:
+            self.is_resizing = True
+            self.resize_handle = hit_handle
+            # 拖拽边锚点 → 自动解除比例锁定（用户意图是自由调整单边）
+            if self._aspect_locked and hit_handle in ('top', 'bottom', 'left', 'right'):
+                self._unlock_aspect_ratio()
+            self._hide_toolbar_and_capsule()
+            return
         
         # 标记工具：在选区内（且不在锚点上，锚点已上面处理）
         if self._mark_tool != 'none' and self.selection_rect.contains(pos):
@@ -1225,17 +1248,17 @@ class ScreenshotOverlay(QWidget):
     def _update_cursor_for_position(self, pos: QPoint):
         """根据鼠标位置更新光标样式"""
         # 锚点优先：悬停在选区调整点上时始终显示调整光标（与是否选中标记工具无关）
-        for handle, rect in self.handles.items():
-            if not rect.isNull() and rect.contains(pos):
-                if handle in ('top_left', 'bottom_right'):
-                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-                elif handle in ('top_right', 'bottom_left'):
-                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-                elif handle in ('top', 'bottom'):
-                    self.setCursor(Qt.CursorShape.SizeVerCursor)
-                elif handle in ('left', 'right'):
-                    self.setCursor(Qt.CursorShape.SizeHorCursor)
-                return
+        hit_handle = self._hit_handle_at(pos)
+        if hit_handle:
+            if hit_handle in ('top_left', 'bottom_right'):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif hit_handle in ('top_right', 'bottom_left'):
+                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif hit_handle in ('top', 'bottom'):
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            elif hit_handle in ('left', 'right'):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            return
         
         if self._mark_tool == 'text':
             self.setCursor(Qt.CursorShape.IBeamCursor)

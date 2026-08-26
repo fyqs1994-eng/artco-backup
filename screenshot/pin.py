@@ -45,7 +45,7 @@ class PinWindow(QWidget):
         self._drag_start_pos = QPoint()
 
         # 阴影边距
-        self._shadow_margin = 8
+        self._shadow_margin = 12
 
         self._init_window()
         self._update_size()
@@ -86,18 +86,42 @@ class PinWindow(QWidget):
         self.repaint()
     
     def _get_shadow_params(self, size: int):
-        """根据尺寸动态计算阴影参数，小尺寸时阴影更柔和"""
-        # 基于尺寸的缩放因子 (64px → 0.5, 200px+ → 1.0)
+        """根据尺寸动态计算阴影参数。
+        返回 (layers, y_offset, max_spread)：
+          - layers: [(spread, alpha), …]  从外到内逐层叠加
+          - y_offset: 阴影整体 Y 偏移（模拟自然光照方向）
+          - max_spread: 最外层扩展像素
+        """
         scale = min(1.0, max(0.4, size / 200))
-        
-        # 动态阴影层：offset 和 alpha 随尺寸缩放
-        layers = [
-            (int(6 * scale), int(20 * scale)),   # 外层：更大范围，更淡
-            (int(3 * scale), int(35 * scale)),   # 中层
-            (int(1 * scale), int(15 * scale)),   # 内层：贴近边缘，柔和过渡
-        ]
-        # 过滤掉 offset 为 0 的层
-        return [(o, a) for o, a in layers if o > 0]
+
+        max_spread = int(8 * scale)     # 扩散范围
+        y_offset   = int(2 * scale)     # 轻微向下偏移
+        max_alpha  = int(10 * scale)    # 整体浓度
+        n_layers   = 8
+
+        layers = []
+        for i in range(n_layers):
+            t = i / max(1, n_layers - 1)  # 0(外) → 1(内)
+            spread = int(max_spread * (1.0 - t))
+            alpha = int(max_alpha * (t ** 1.5))  # 指数衰减：外层极淡
+            if alpha > 0:
+                layers.append((spread, alpha))
+        return layers, y_offset, max_spread
+
+    def _draw_shadow(self, painter, img_rect, min_side):
+        """绘制平滑多层投影（圆角矩形，模拟自然光）"""
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPainterPath, QPen, QBrush
+
+        layers, y_offset, max_spread = self._get_shadow_params(min_side)
+        radius = min(img_rect.width(), img_rect.height(), 4)  # 极小圆角
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        # 从外到内逐层绘制
+        for spread, alpha in layers:
+            r = img_rect.adjusted(-spread, -spread + y_offset, spread, spread + y_offset)
+            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.drawRoundedRect(QRectF(r), radius, radius)
     
     def paintEvent(self, event):
         """绘制图片和阴影"""
@@ -114,13 +138,8 @@ class PinWindow(QWidget):
                 self._thumbnail_size
             )
 
-            # 动态阴影（方形，无圆角）
-            shadow_layers = self._get_shadow_params(self._thumbnail_size)
-            for offset, alpha in shadow_layers:
-                shadow_rect = img_rect.adjusted(-offset, -offset, offset, offset)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(0, 0, 0, alpha))
-                painter.drawRect(shadow_rect)
+            # 平滑多层投影
+            self._draw_shadow(painter, img_rect, self._thumbnail_size)
 
             # 设置透明度
             painter.setOpacity(self._opacity)
@@ -154,15 +173,9 @@ class PinWindow(QWidget):
                 scaled_height
             )
 
-            # 动态阴影（方形，无圆角）
+            # 平滑多层投影
             min_side = min(scaled_width, scaled_height)
-            shadow_layers = self._get_shadow_params(min_side)
-
-            for offset, alpha in shadow_layers:
-                shadow_rect = img_rect.adjusted(-offset, -offset, offset, offset)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(0, 0, 0, alpha))
-                painter.drawRect(shadow_rect)
+            self._draw_shadow(painter, img_rect, min_side)
 
             # 设置透明度
             painter.setOpacity(self._opacity)

@@ -400,7 +400,7 @@ class ClipboardFloatPanel(QWidget):
     """剪贴板悬浮面板（画廊式）"""
     
     closed = Signal()
-    COLUMNS = 3  # 3 列网格
+    COLUMNS = 4  # 4 列网格
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -417,7 +417,7 @@ class ClipboardFloatPanel(QWidget):
             Qt.WindowType.NoDropShadowWindowHint  # 禁用系统阴影
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedWidth(340)  # 3列 x 96px + 间距 + 边距
+        self.setFixedWidth(432)  # 4列 x 96px + 3×8px间距 + 2×12px边距
         self.setMaximumHeight(480)
         
         # 主容器

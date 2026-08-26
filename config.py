@@ -646,3 +646,179 @@ class WeComConfigManager:
 
 # 全局企业微信配置管理器实例
 wecom_config = WeComConfigManager()
+
+
+# ════════════════════════════════════════════════════════════
+# 外观配置 (浮窗背景渐变/图片自定义)
+# ════════════════════════════════════════════════════════════
+
+APPEARANCE_CONFIG_PATH = os.path.join(get_app_dir(), "appearance.json")
+
+# 默认渐变方案：纯白
+DEFAULT_GRADIENT = {
+    "type": "gradient",          # "gradient" 或 "image"
+    "direction": "diagonal",     # "diagonal" | "horizontal" | "vertical"
+    "stops": [
+        {"pos": 0.0,  "color": [255, 255, 255, 1.0]},
+        {"pos": 1.0,  "color": [250, 250, 252, 1.0]},
+    ],
+    "border_radius": 12,
+    "border": "1px solid rgba(255, 255, 255, 0.6)",
+}
+
+# 预设方案库
+PRESET_SCHEMES = {
+    "aurora": {
+        "name": "极光蓝黄紫粉",
+        "direction": "diagonal",
+        "stops": [
+            {"pos": 0.0,  "color": [120, 190, 255, 1.0]},
+            {"pos": 0.33, "color": [255, 240, 170, 1.0]},
+            {"pos": 0.66, "color": [190, 160, 245, 1.0]},
+            {"pos": 1.0,  "color": [255, 180, 210, 1.0]},
+        ],
+    },
+    "mint_sunset": {
+        "name": "薄荷日落",
+        "direction": "diagonal",
+        "stops": [
+            {"pos": 0.0,  "color": [200, 248, 225, 1.0]},
+            {"pos": 0.35, "color": [205, 228, 253, 1.0]},
+            {"pos": 0.7,  "color": [225, 195, 240, 1.0]},
+            {"pos": 1.0,  "color": [242, 175, 200, 1.0]},
+        ],
+    },
+    "ocean_breeze": {
+        "name": "海风",
+        "direction": "diagonal",
+        "stops": [
+            {"pos": 0.0,  "color": [170, 220, 240, 1.0]},
+            {"pos": 0.5,  "color": [210, 240, 230, 1.0]},
+            {"pos": 1.0,  "color": [240, 225, 200, 1.0]},
+        ],
+    },
+    "warm_gray": {
+        "name": "暖灰",
+        "direction": "diagonal",
+        "stops": [
+            {"pos": 0.0,  "color": [245, 243, 240, 1.0]},
+            {"pos": 1.0,  "color": [235, 230, 225, 1.0]},
+        ],
+    },
+    "pure_white": {
+        "name": "纯白",
+        "direction": "diagonal",
+        "stops": [
+            {"pos": 0.0,  "color": [255, 255, 255, 1.0]},
+            {"pos": 1.0,  "color": [250, 250, 252, 1.0]},
+        ],
+    },
+}
+
+
+class AppearanceConfigManager:
+    """外观配置管理器 — 浮窗背景渐变 / 图片自定义"""
+    _instance = None
+    _config = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._load_config()
+        return cls._instance
+
+    def _load_config(self):
+        if os.path.exists(APPEARANCE_CONFIG_PATH):
+            try:
+                with open(APPEARANCE_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    self._config = json.load(f)
+                # 合并默认字段
+                for key, value in DEFAULT_GRADIENT.items():
+                    if key not in self._config:
+                        self._config[key] = value
+            except Exception:
+                self._config = DEFAULT_GRADIENT.copy()
+        else:
+            self._config = DEFAULT_GRADIENT.copy()
+
+    def _save_config(self):
+        try:
+            with open(APPEARANCE_CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(self._config, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def get_config(self) -> dict:
+        return self._config
+
+    def set_config(self, config: dict):
+        self._config = config
+        self._save_config()
+
+    def get(self, key, default=None):
+        return self._config.get(key, default)
+
+    def set(self, key, value):
+        self._config[key] = value
+        self._save_config()
+
+    def apply_preset(self, preset_id: str):
+        """应用预设方案"""
+        preset = PRESET_SCHEMES.get(preset_id)
+        if preset:
+            self._config["type"] = "gradient"
+            self._config["direction"] = preset["direction"]
+            self._config["stops"] = [s for s in preset["stops"]]
+            self._save_config()
+
+    def set_image(self, image_path: str):
+        """设置为图片背景"""
+        self._config["type"] = "image"
+        self._config["image_path"] = image_path
+        self._save_config()
+
+    def set_gradient(self, direction: str, stops: list):
+        """设置自定义渐变"""
+        self._config["type"] = "gradient"
+        self._config["direction"] = direction
+        self._config["stops"] = stops
+        self._save_config()
+
+    def get_background_css(self, border_radius: int = 12, border: str = None) -> str:
+        """生成 #container 背景的 QSS 片段"""
+        if self._config.get("type") == "image" and self._config.get("image_path"):
+            path = self._config["image_path"].replace("\\", "/")
+            return f"background-image: url('{path}'); background-position: center; background-repeat: no-repeat; background-origin: content;"
+
+        direction = self._config.get("direction", "diagonal")
+        if direction == "horizontal":
+            x1, y1, x2, y2 = 0, 0, 1, 0
+        elif direction == "vertical":
+            x1, y1, x2, y2 = 0, 0, 0, 1
+        else:
+            x1, y1, x2, y2 = 0, 0, 1, 1
+
+        stops = self._config.get("stops", [])
+        if not stops:
+            stops = DEFAULT_GRADIENT["stops"]
+
+        stop_strs = []
+        for s in stops:
+            pos = s.get("pos", 0)
+            c = s.get("color", [255, 255, 255, 1.0])
+            r, g, b = int(c[0]), int(c[1]), int(c[2])
+            a = c[3] if len(c) > 3 else 1.0
+            stop_strs.append(f"stop:{pos} rgba({r}, {g}, {b}, {a})")
+
+        stops_css = ",\n                    ".join(stop_strs)
+        return f"background: qlineargradient(x1:{x1}, y1:{y1}, x2:{x2}, y2:{y2},\n                    {stops_css});"
+
+    def get_border_css(self) -> str:
+        return self._config.get("border", DEFAULT_GRADIENT["border"])
+
+    def get_border_radius(self) -> int:
+        return self._config.get("border_radius", 12)
+
+
+# 全局外观配置管理器实例
+appearance_config = AppearanceConfigManager()

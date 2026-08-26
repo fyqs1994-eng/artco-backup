@@ -31,6 +31,7 @@ class EditorWindow(QMainWindow):
         self._annotation_panel_visible = False
         self._annotation_expand_delta = 0
         self._annotation_expanded_by_us = False
+        self._skip_next_sync = False
         self.init_ui()
 
     
@@ -123,6 +124,8 @@ class EditorWindow(QMainWindow):
         
         # 连接序号点变化信号
         self.canvas.number_dots_changed.connect(self._sync_annotation_panel)
+        # 连接序号点重编号信号，同步侧栏注释内容映射
+        self.canvas.number_dots_renumbered.connect(self._on_renumber)
         # 连接序号点点击信号，聚焦到侧栏输入框
         self.canvas.number_dot_clicked.connect(self.annotation_panel.focus_annotation)
 
@@ -143,12 +146,25 @@ class EditorWindow(QMainWindow):
     
     def _sync_annotation_panel(self):
         """同步序号注释面板"""
+        if getattr(self, '_skip_next_sync', False):
+            self._skip_next_sync = False
+            return
         number_dots = [m for m in self.canvas.marks if isinstance(m, NumberDot)]
         self.annotation_panel.sync_with_marks(number_dots)
         panel_visible = self.annotation_panel.isVisible()
         if panel_visible != self._annotation_panel_visible:
             self._on_annotation_panel_visibility_changed(panel_visible)
             self._annotation_panel_visible = panel_visible
+
+    def _on_renumber(self, mapping: dict, deleted: int):
+        """处理重编号：先执行侧栏 renumber，再跳过紧随的 sync_with_marks。
+        
+        renumber 已经全量重建了侧栏（含编号+内容），若紧随的 number_dots_changed
+        → _sync_annotation_panel → sync_with_marks 再次用新编号增删，会把刚建好的
+        条目删掉再补空，导致内容错乱。用标志位让下一次 _sync_annotation_panel 跳过。
+        """
+        self._skip_next_sync = True
+        self.annotation_panel.renumber(mapping, deleted)
 
     def _on_annotation_panel_visibility_changed(self, visible: bool):
         """注释侧栏显隐时，窗口向外扩展/收回，避免挤压图片可视区域。"""
