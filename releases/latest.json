@@ -1,8 +1,8 @@
 {
-    "version": "1.1.0",
+    "version": "1.1.1",
     "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/latest/download/Artco.exe",
-    "changelog": "外观自定义系统优化、AI输入框交互改进、剪贴板浮窗扩大、截图锚点判定优化、英文输入法切换修复",
-    "sha256": "c41c6f0f942f8b7819bd030586b6bcd4d199041edcee5618423356dd6e04905d",
+    "changelog": "修复自动更新退出问题（os._exit替代sys.exit）、下载进度显示优化、私有仓库下载认证支持",
+    "sha256": "C41C6F0F942F8B7819BD030586B6BCD4D199041EDCEE5618423356DD6E04905D",
     "min_required": "1.0.0",
     "release_date": "2026-08-26"
 }

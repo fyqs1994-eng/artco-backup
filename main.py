@@ -1431,8 +1431,13 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
 
     def _on_download_progress(self, ratio: float):
         """下载进度回调（在下载线程中调用，需通过 QTimer 切回主线程）"""
-        percent = int(ratio * 100)
-        QTimer.singleShot(0, lambda: self._update_progress.setValue(percent))
+        if ratio < 0:
+            # 不确定模式：content-length 缺失，显示已下载 MB
+            downloaded_mb = -ratio / (1024 * 1024)
+            QTimer.singleShot(0, lambda: self._update_progress.setLabelText(f"正在下载… 已下载 {downloaded_mb:.1f} MB"))
+        else:
+            percent = int(ratio * 100)
+            QTimer.singleShot(0, lambda: self._update_progress.setValue(percent))
 
     def _on_download_complete(self, new_path: str):
         """下载完成，启动 Updater 替换"""

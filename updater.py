@@ -19,6 +19,18 @@ UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/fyqs1994-eng/Artco-backup/main/releases/latest.json"
 )
 
+# ── GitHub Token（私有仓库认证）──
+# 仓库为 Private 时，raw 和 Releases 下载都需要 token 认证。
+# 填入 fine-grained PAT（仅授予本仓库 Contents: Read 权限）。
+# ⚠️ 打包后 token 会内嵌在 exe 中，有被逆向提取的风险，请务必使用最小权限 PAT。
+GITHUB_TOKEN = ""
+
+def _get_auth_headers() -> dict:
+    """返回带 GitHub token 的请求头，token 为空时返回空 dict"""
+    if GITHUB_TOKEN:
+        return {"Authorization": f"token {GITHUB_TOKEN}"}
+    return {}
+
 # ── 更新检查间隔（秒）──
 # 静默检查间隔：6 小时，避免频繁请求
 CHECK_INTERVAL_SECONDS = 6 * 60 * 60
@@ -117,7 +129,7 @@ def check_for_update(timeout: int = 10) -> tuple:
     """
     try:
         import requests
-        resp = requests.get(UPDATE_MANIFEST_URL, timeout=(5, timeout))
+        resp = requests.get(UPDATE_MANIFEST_URL, timeout=(5, timeout), headers=_get_auth_headers())
         if resp.status_code != 200:
             return False, None
         info = resp.json()
@@ -167,7 +179,7 @@ def download_update(update_info: dict, progress_callback=None) -> str:
     temp_dir = tempfile.mkdtemp(prefix="artco_update_")
     target_path = os.path.join(temp_dir, "Artco_new.exe")
 
-    resp = requests.get(url, stream=True, timeout=60)
+    resp = requests.get(url, stream=True, timeout=60, headers=_get_auth_headers())
     if resp.status_code != 200:
         raise RuntimeError(f"下载失败，HTTP {resp.status_code}")
 
@@ -178,8 +190,12 @@ def download_update(update_info: dict, progress_callback=None) -> str:
         for chunk in resp.iter_content(8192):
             f.write(chunk)
             downloaded += len(chunk)
-            if progress_callback and total > 0:
-                progress_callback(downloaded / total)
+            if progress_callback:
+                if total > 0:
+                    progress_callback(downloaded / total)
+                else:
+                    # content-length 缺失时，按已下载 MB 数反馈进度（负值表示不确定模式）
+                    progress_callback(-downloaded)
 
     # SHA256 校验
     expected_sha = update_info.get("sha256", "")
@@ -234,8 +250,10 @@ def apply_update(new_exe_path: str):
         "--relaunch", current_exe,
     ], creationflags=subprocess.CREATE_NO_WINDOW)
 
-    # 主程序退出
-    sys.exit(0)
+    # 主程序必须立即退出，否则 Updater 无法替换正在运行的 exe。
+    # sys.exit(0) 抛 SystemExit，在 Qt 事件循环中可能被吞掉导致进程不退出，
+    # 因此用 os._exit(0) 强制终止，确保 Updater 能拿到文件锁。
+    os._exit(0)
 
 
 def do_full_update(update_info: dict, progress_callback=None):

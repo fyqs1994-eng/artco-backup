@@ -1523,7 +1523,7 @@ class SettingsDialog(QDialog):
             try:
                 new_path = updater_mod.download_update(
                     info,
-                    progress_callback=lambda r: QTimer.singleShot(0, lambda: self._update_progress.setValue(int(r * 100)))
+                    progress_callback=lambda r: QTimer.singleShot(0, lambda: self._update_progress.setValue(int(r * 100)) if r >= 0 else self._update_progress.setLabelText(f"正在下载… 已下载 {-r / (1024 * 1024):.1f} MB"))
                 )
                 if self._update_cancelled:
                     return
