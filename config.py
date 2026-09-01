@@ -6,6 +6,10 @@ import os
 import sys
 import json
 import shutil
+import threading
+import time
+
+import requests
 
 # --- 配置文件路径 ---
 def get_app_dir():
@@ -117,11 +121,226 @@ DEFAULT_AI_CONFIG = {
         "openai": "",
         "anthropic": "",
         "seedream": ""
-    }
+    },
+    "custom_providers": []
 }
 
 # --- 默认 Prompt ---
 DEFAULT_PROMPT = "请详细分析这张图片的内容。如果是代码，请提取代码；如果是UI，请描述布局；如果是文字，请OCR识别。"
+
+
+# ==================== 模型分类器 ====================
+
+# OpenRouter 模型元数据缓存文件路径
+_OPENROUTER_CACHE_PATH = os.path.join(CONFIG_DIR, "openrouter_models_cache.json")
+
+# 关键词分类规则（用于 OpenRouter 未收录的模型）
+_IMAGE_GEN_KEYWORDS = [
+    "dall-e", "imagen", "seedream", "flux", "sdxl", "stable-diffusion",
+    "midjourney", "kolors", "hunyuan-image", "wan", "cogview", "dall",
+    "sd-", "sdxl", "playground", "ideogram", "recraft", "leo", "imagen",
+    "gpt-image", "gpt-5-image", "nano-banana", "flux-kontext",
+    "gemini-image", "imagen-4", "tongyi-image", "wanx",
+]
+_VISION_KEYWORDS = [
+    "gpt-4o", "gpt-4-vision", "gpt-4-turbo", "gemini", "claude",
+    "qwen-vl", "qwen2-vl", "qwen3-vl", "qwen2.5-vl", "qwen-vision",
+    "internvl", "llava", "vision", "-vl", "vl-", "multimodal",
+    "glm-4v", "glm-4.6v", "glm-4.5v", "hunyuan-vision", "hunyuan-turbo-vision",
+    "pixtral", "moondream", "cogvlm", "mini-cpm", "minicpm",
+]
+
+
+class ModelClassifier:
+    """模型分类器：基于 OpenRouter API + 关键词匹配的混合策略"""
+
+    _instance = None
+    _modality_cache = None  # {model_name: {"input": [...], "output": [...]}}
+    _cache_timestamp = 0
+    _cache_lock = threading.Lock()
+    _fetch_lock = threading.Lock()
+    _is_fetching = False
+
+    # 缓存有效期：24小时
+    _CACHE_TTL = 86400
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._load_cache()
+        return cls._instance
+
+    def _load_cache(self):
+        """从本地文件加载缓存的模型元数据"""
+        try:
+            if os.path.exists(_OPENROUTER_CACHE_PATH):
+                with open(_OPENROUTER_CACHE_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._modality_cache = data.get("models", {})
+                    self._cache_timestamp = data.get("timestamp", 0)
+        except Exception:
+            self._modality_cache = {}
+            self._cache_timestamp = 0
+
+    def _save_cache(self):
+        """保存模型元数据到本地文件"""
+        try:
+            with open(_OPENROUTER_CACHE_PATH, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "models": self._modality_cache,
+                    "timestamp": self._cache_timestamp,
+                }, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def fetch_openrouter_models(self):
+        """从 OpenRouter API 拉取模型列表并构建分类字典（同步）"""
+        with self._fetch_lock:
+            if self._is_fetching:
+                return False
+            self._is_fetching = True
+        try:
+            resp = requests.get(
+                "https://openrouter.ai/api/v1/models",
+                timeout=15,
+                headers={"User-Agent": "Artco/1.0"},
+            )
+            if resp.status_code != 200:
+                return False
+
+            data = resp.json().get("data", [])
+            cache = {}
+            for model in data:
+                model_id = model.get("id", "")
+                if not model_id:
+                    continue
+                arch = model.get("architecture", {})
+                input_mods = arch.get("input_modalities", [])
+                output_mods = arch.get("output_modalities", [])
+
+                # 存储多个别名形式以便匹配
+                cache[model_id] = {
+                    "input": input_mods,
+                    "output": output_mods,
+                }
+                # 去掉 provider 前缀后的名字也存一份（如 qwen/qwen3-vl → qwen3-vl）
+                if "/" in model_id:
+                    short_name = model_id.split("/", 1)[1]
+                    if short_name not in cache:
+                        cache[short_name] = {
+                            "input": input_mods,
+                            "output": output_mods,
+                        }
+
+            with self._cache_lock:
+                self._modality_cache = cache
+                self._cache_timestamp = time.time()
+                self._save_cache()
+
+            return True
+        except Exception:
+            return False
+        finally:
+            with self._fetch_lock:
+                self._is_fetching = False
+
+    def fetch_async(self):
+        """异步拉取 OpenRouter 模型（不阻塞 UI）"""
+        if self._is_fetching:
+            return
+        t = threading.Thread(target=self.fetch_openrouter_models, daemon=True)
+        t.start()
+
+    def _is_cache_fresh(self):
+        """检查缓存是否在有效期内"""
+        if not self._modality_cache:
+            return False
+        return (time.time() - self._cache_timestamp) < self._CACHE_TTL
+
+    def _lookup_openrouter(self, model_name):
+        """在 OpenRouter 缓存中查找模型能力"""
+        if not self._modality_cache:
+            return None
+        # 直接匹配
+        entry = self._modality_cache.get(model_name)
+        if entry:
+            return entry
+        # 不区分大小写匹配
+        lower = model_name.lower()
+        for key, val in self._modality_cache.items():
+            if key.lower() == lower:
+                return val
+        return None
+
+    def _match_keywords(self, model_name):
+        """关键词匹配兜底"""
+        lower = model_name.lower()
+
+        # 图像生成关键词
+        for kw in _IMAGE_GEN_KEYWORDS:
+            if kw in lower:
+                return "image_gen"
+
+        # 视觉分析关键词
+        for kw in _VISION_KEYWORDS:
+            if kw in lower:
+                return "vision"
+
+        # 默认归为视觉分析（大多数现代 LLM 都支持图片输入）
+        return "vision"
+
+    def classify(self, model_name):
+        """分类单个模型，返回 'vision' / 'image_gen' / 'both'"""
+        if not model_name:
+            return "vision"
+
+        # 第一层：OpenRouter 缓存查找
+        entry = self._lookup_openrouter(model_name)
+        if entry:
+            input_mods = entry.get("input", [])
+            output_mods = entry.get("output", [])
+            has_vision = "image" in input_mods
+            has_image_gen = "image" in output_mods
+            if has_vision and has_image_gen:
+                return "both"
+            elif has_image_gen:
+                return "image_gen"
+            elif has_vision:
+                return "vision"
+            # OpenRouter 有记录但不含 image modality → 纯文本模型
+            # 降级到关键词匹配看是否能归类
+            return self._match_keywords(model_name)
+
+        # 第二层：关键词匹配
+        return self._match_keywords(model_name)
+
+    def classify_batch(self, model_names):
+        """批量分类模型列表，返回 {"vision": [...], "image_gen": [...]}"""
+        vision = []
+        image_gen = []
+
+        for name in model_names:
+            if not name:
+                continue
+            category = self.classify(name)
+            if category == "vision":
+                vision.append(name)
+            elif category == "image_gen":
+                image_gen.append(name)
+            elif category == "both":
+                vision.append(name)
+                image_gen.append(name)
+
+        return {"vision": vision, "image_gen": image_gen}
+
+    def ensure_cache_ready(self):
+        """确保缓存可用：如果缓存过期或为空，触发异步拉取"""
+        if not self._is_cache_fresh():
+            self.fetch_async()
+
+
+# 全局分类器实例
+model_classifier = ModelClassifier()
 
 
 class AIConfigManager:
@@ -206,6 +425,10 @@ class AIConfigManager:
         """获取图像生成模型"""
         model = self._config.get("image_gen_model")
         return model if model else "imagen-3.0-generate-001"
+
+    def get_image_gen_provider(self):
+        """获取图像生成模型所属的 provider"""
+        return self._config.get("image_gen_provider", "google")
     
     def get_current_provider(self):
         """获取当前模型的提供商"""
@@ -257,6 +480,70 @@ class AIConfigManager:
                 self.set_current_provider_selected(remaining[0])
             else:
                 self.set_current_provider_selected("")
+
+    # ========== 自定义服务商管理 ==========
+    def get_custom_providers(self):
+        """获取自定义服务商列表"""
+        return self._config.get("custom_providers", [])
+
+    def add_custom_provider(self, provider_id, name, base_url, key_url="",
+                            vision_models=None, image_gen_models=None):
+        """添加自定义服务商"""
+        customs = self.get_custom_providers()
+        entry = {
+            "id": provider_id,
+            "name": name,
+            "base_url": base_url,
+            "key_url": key_url,
+            "vision_models": vision_models or [],
+            "image_gen_models": image_gen_models or [],
+        }
+        customs.append(entry)
+        self._config["custom_providers"] = customs
+        # 同时启用该服务商
+        self.add_provider(provider_id)
+        self._save_config()
+
+    def update_custom_provider(self, provider_id, name=None, base_url=None, key_url=None,
+                               vision_models=None, image_gen_models=None):
+        """更新自定义服务商信息"""
+        customs = self.get_custom_providers()
+        for c in customs:
+            if c["id"] == provider_id:
+                if name is not None:
+                    c["name"] = name
+                if base_url is not None:
+                    c["base_url"] = base_url
+                if key_url is not None:
+                    c["key_url"] = key_url
+                if vision_models is not None:
+                    c["vision_models"] = vision_models
+                if image_gen_models is not None:
+                    c["image_gen_models"] = image_gen_models
+                break
+        self._config["custom_providers"] = customs
+        self._save_config()
+
+    def remove_custom_provider(self, provider_id):
+        """删除自定义服务商记录"""
+        customs = self.get_custom_providers()
+        customs = [c for c in customs if c["id"] != provider_id]
+        self._config["custom_providers"] = customs
+        # 清理 api_keys / api_base_urls 中残留
+        self._config.get("api_keys", {}).pop(provider_id, None)
+        self._config.get("api_base_urls", {}).pop(provider_id, None)
+        self._save_config()
+
+    def get_custom_provider_info(self, provider_id):
+        """获取单个自定义服务商信息"""
+        for c in self.get_custom_providers():
+            if c["id"] == provider_id:
+                return c
+        return None
+
+    def is_custom_provider(self, provider_id):
+        """判断是否为自定义服务商"""
+        return self.get_custom_provider_info(provider_id) is not None
 
 
 # 全局配置管理器实例

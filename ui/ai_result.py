@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QTextEdit, QGraphicsDropShadowEffect, QFileDialog, QLineEdit,
     QScrollArea
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QBuffer, QIODevice
-from PySide6.QtGui import QColor, QPixmap, QGuiApplication
+from PySide6.QtCore import Qt, Signal, QTimer, QBuffer, QIODevice, QSize, QPropertyAnimation, QEasingCurve, Property, QPointF
+from PySide6.QtGui import QColor, QPixmap, QGuiApplication, QPainter, QPen
 
 from database import add_record
 from ui.theme import FONT_FAMILY_MONO
@@ -233,47 +233,72 @@ class AIImageResultWindow(QWidget):
 
 
 class ThinkingBubble(QWidget):
-    """AI 思考中占位气泡 — 三点跳动动画"""
+    """AI 思考中占位气泡 — 三点波浪跳动动画
     
-    def __init__(self, parent=None):
+    参考 iMessage / Telegram 的 "正在输入" 效果：
+   三个圆点依次上下弹跳，用正弦曲线驱动，平滑无跳跃。
+    """
+    
+    def __init__(self, parent=None, color=None):
         super().__init__(parent)
-        self._dot_index = 0
+        self._progress = 0.0  # 动画进度 0.0 → 1.0 循环
+        self._dot_color = color if color is not None else QColor(99, 102, 241)
         self._init_ui()
         
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._animate)
-        self._timer.start(400)
+        self._anim = QPropertyAnimation(self, b"progress")
+        self._anim.setDuration(1200)   # 一个完整波浪周期
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.Linear)
+        self._anim.setLoopCount(-1)
+        self._anim.start()
     
     def _init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(0)
-        
-        self._label = QLabel("●  ○  ○")
-        self._label.setFixedHeight(32)
-        self._label.setMaximumWidth(120)
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet(f"""
-            QLabel {{
-                background-color: #fafafa;
-                color: rgba(99, 102, 241, 0.7);
-                border: none;
-                border-radius: 10px;
-                font-size: 13px;
-                padding: 6px 16px;
-                letter-spacing: 2px;
-            }}
-        """)
-        layout.addWidget(self._label)
-        layout.addStretch()
+        self.setFixedHeight(36)
+        self.setMaximumWidth(68)
     
-    def _animate(self):
-        dots = ["●  ○  ○", "○  ●  ○", "○  ○  ●"]
-        self._dot_index = (self._dot_index + 1) % len(dots)
-        self._label.setText(dots[self._dot_index])
+    def get_progress(self):
+        return self._progress
+    
+    def set_progress(self, val):
+        self._progress = val
+        self.update()
+    
+    progress = Property(float, get_progress, set_progress)
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        w = self.width()
+        h = self.height()
+        cx = w / 2
+        cy = h / 2
+        dot_radius = 4.0
+        dot_spacing = 14.0
+        base_y = cy + 2  # 基线略偏下，跳动方向向上
+        
+        color = self._dot_color  # 可由调用方指定（白色用于按钮态）
+        
+        for i in range(3):
+            # 每个点错开 1/3 周期；三角波实现匀速线性跳动
+            t = (self._progress + i / 3.0) % 1.0
+            triangle = 1.0 - abs(2.0 * t - 1.0)  # 0→1→0，匀速
+            y = base_y - triangle * 3.5
+            x = cx + (i - 1) * dot_spacing
+            
+            # 透明度随高度变化：最高点最亮
+            alpha = int(120 + triangle * 100)
+            dot_color = QColor(color)
+            dot_color.setAlpha(alpha)
+            painter.setBrush(dot_color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(QPointF(x, y), dot_radius, dot_radius)
+        
+        painter.end()
     
     def stop(self):
-        self._timer.stop()
+        self._anim.stop()
 
 
 class ChatMessageWidget(QWidget):
@@ -427,6 +452,7 @@ class AIResultBubble(QWidget):
     closed = Signal()
     pin_image_requested = Signal(QPixmap)  # 请求贴图
     followup_requested = Signal(str)  # 追问信号（传递用户输入的文本）
+    open_canvas_requested = Signal(QPixmap, str)  # 请求打开 AI 工作台（图 + prompt）
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -555,29 +581,25 @@ class AIResultBubble(QWidget):
         
         layout.addWidget(self.input_container)
         
-        # ── 按钮区域 ──
+# ── 按钮区域（纯图标按钮，避免文字被截断）──
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
-        self.btn_copy = QPushButton(" 复制内容")
-        self.btn_copy.setIcon(qta.icon('mdi6.content-copy', color='#555'))
-        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_copy.clicked.connect(self._copy_content)
+        btn_layout.setSpacing(8)
+
+        self.btn_copy = self._make_icon_btn('mdi6.content-copy', "复制", self._copy_content)
         btn_layout.addWidget(self.btn_copy)
-        
-        self.btn_pin = QPushButton(" 贴到屏幕")
-        self.btn_pin.setIcon(qta.icon('mdi6.pin', color='#555'))
-        self.btn_pin.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_pin.clicked.connect(self._pin_image)
+
+        self.btn_pin = self._make_icon_btn('mdi6.pin', "贴到屏幕", self._pin_image)
         self.btn_pin.hide()
         btn_layout.addWidget(self.btn_pin)
-        
-        self.btn_archive = QPushButton(" 归档")
-        self.btn_archive.setIcon(qta.icon('mdi6.inbox', color='#555'))
-        self.btn_archive.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_archive.clicked.connect(self._archive_record)
+
+        self.btn_archive = self._make_icon_btn('mdi6.inbox', "归档", self._archive_record)
         btn_layout.addWidget(self.btn_archive)
-        
+
+        self.btn_canvas = self._make_icon_btn('mdi6.view-grid-plus', "工作台", self._open_canvas, color='#4caf50')
+        self.btn_canvas.hide()
+        btn_layout.addWidget(self.btn_canvas)
+
         layout.addLayout(btn_layout)
         
         self.container.setStyleSheet("""
@@ -660,6 +682,17 @@ class AIResultBubble(QWidget):
         self.setFixedSize(440, 420)
         self.container.move(20, 20)
     
+    def _make_icon_btn(self, icon_name: str, tooltip: str, slot, color: str = '#555') -> QPushButton:
+        """构造纯图标操作按钮（不含文字，避免文字被截断）"""
+        btn = QPushButton()
+        btn.setIcon(qta.icon(icon_name, color=color))
+        btn.setIconSize(QSize(18, 18))
+        btn.setFixedSize(36, 34)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(tooltip)
+        btn.clicked.connect(slot)
+        return btn
+
     def _switch_to_chat_mode(self):
         """首次追问时切换到聊天列表模式"""
         if self._is_chat_mode:
@@ -876,8 +909,8 @@ class AIResultBubble(QWidget):
         self.chat_scroll.hide()
         self.image_label.show()
         self.btn_copy.show()
-        self.btn_copy.setText(" 复制图片")
         self.btn_pin.show()
+        self.btn_canvas.show()
         self.input_container.show()
         self.show()
     
@@ -900,20 +933,21 @@ class AIResultBubble(QWidget):
         else:
             QGuiApplication.clipboard().setText(self.full_text)
         self.btn_copy.setIcon(qta.icon('mdi6.check', color='#4caf50'))
-        self.btn_copy.setText(" 已复制")
         QTimer.singleShot(2000, self._reset_copy_btn)
     
     def _reset_copy_btn(self):
         self.btn_copy.setIcon(qta.icon('mdi6.content-copy', color='#555'))
-        if self._current_pixmap and not self._current_pixmap.isNull() and self._is_ai_generated:
-            self.btn_copy.setText(" 复制图片")
-        else:
-            self.btn_copy.setText(" 复制内容")
     
     def _pin_image(self):
         """贴图按钮点击"""
         if self._current_pixmap:
             self.pin_image_requested.emit(self._current_pixmap)
+    
+    def _open_canvas(self):
+        """打开 AI 工作台，把当前图片与 prompt 送入"""
+        if self._current_pixmap:
+            prompt = getattr(self, "_last_prompt", None) or self.full_text or ""
+            self.open_canvas_requested.emit(self._current_pixmap, prompt)
     
     def set_image_data(self, image_data: bytes):
         self._image_data = image_data
@@ -943,7 +977,6 @@ class AIResultBubble(QWidget):
         
         if not self._image_data:
             self.btn_archive.setIcon(qta.icon('mdi6.alert', color='#ff9800'))
-            self.btn_archive.setText(" 无图片")
             return
         
         try:
@@ -954,21 +987,15 @@ class AIResultBubble(QWidget):
             
             self._is_archived = True
             self.btn_archive.setIcon(qta.icon('mdi6.check', color='#4caf50'))
-            self.btn_archive.setText(" 已归档")
             self.btn_archive.setEnabled(False)
             self.btn_archive.setStyleSheet("""
                 QPushButton {
                     background-color: #e8f5e9;
                     border: 1px solid #4caf50;
-                    border-radius: 6px;
-                    padding: 8px 16px;
-                    color: #4caf50;
-                    font-size: 13px;
                 }
             """)
         except Exception:
             self.btn_archive.setIcon(qta.icon('mdi6.close', color='#f44336'))
-            self.btn_archive.setText(" 失败")
     
     def _close_bubble(self):
         self.closed.emit()

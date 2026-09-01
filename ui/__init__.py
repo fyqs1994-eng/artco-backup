@@ -18,6 +18,7 @@ from .prompt_manager import PromptSettingsWindow, PromptSelectMenu
 from .archive import ArchiveDetailDialog, ArchiveCard, ArchiveGalleryPanel, ClipboardHistoryManager
 from .workbench import WorkbenchWindow
 from .ai_result import AIResultBubble, AIResultPanel, AIImageResultWindow
+from .gen_canvas import GenCanvas
 from .assign_panel import AssignPanel
 from .clipboard_float import ClipboardFloatPanel
 
@@ -41,10 +42,13 @@ __all__ = [
     # 工作台
     'WorkbenchWindow',
     
-    # AI 结果展示
+# AI 结果展示
     'AIResultBubble',
     'AIResultPanel',
     'AIImageResultWindow',
+    
+    # AI 工作台
+    'GenCanvas',
     
     # 分配面板
     'AssignPanel',

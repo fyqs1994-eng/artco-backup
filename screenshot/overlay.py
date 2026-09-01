@@ -65,7 +65,8 @@ class ScreenSelectorWindow(QWidget):
         self.show()
         self.activateWindow()
         self.setFocus()
-        self.grabKeyboard()  # 抢占系统键盘焦点，防止按键穿透到底层应用
+        # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
+        # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
     
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -98,15 +99,12 @@ class ScreenSelectorWindow(QWidget):
     def enterEvent(self, event):
         self.is_hovered = True
         self.screen_selected.emit(self.screen)  # 悬停时发送屏幕选择信号
-        # 鼠标进入时抢占键盘焦点，确保此窗口能接收按键
         self.activateWindow()
         self.setFocus()
-        self.grabKeyboard()
         self.update()
     
     def leaveEvent(self, event):
         self.is_hovered = False
-        self.releaseKeyboard()
         self.update()
     
     def mousePressEvent(self, event):
@@ -311,7 +309,8 @@ class ScreenshotOverlay(QWidget):
         self.show()
         self.activateWindow()
         self.setFocus()
-        self.grabKeyboard()  # 抢占系统键盘焦点，防止按键穿透到底层应用
+        # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
+        # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
         
         # 注册到活跃实例列表
         self.__class__._active_instances.append(weakref.ref(self))
@@ -349,15 +348,9 @@ class ScreenshotOverlay(QWidget):
         if hasattr(self, '_temp_text_cursor_timer') and self._temp_text_cursor_timer.isActive():
             self._temp_text_cursor_timer.stop()
         
-        # 释放鼠标抓取
+        # 释放鼠标抓取（如果有）
         try:
             self.releaseMouse()
-        except:
-            pass
-        
-        # 释放键盘焦点
-        try:
-            self.releaseKeyboard()
         except:
             pass
         
@@ -686,15 +679,11 @@ class ScreenshotOverlay(QWidget):
         """点击 AI 按钮 - 工具栏收缩，AI胶囊已经在展开"""
         if self.toolbar:
             self.toolbar.collapse()
-        # AI 输入框需要键盘输入，临时释放键盘抢占
-        self.releaseKeyboard()
     
     def _on_toolbar_expand(self):
         """工具栏展开 - AI 胶囊收缩"""
         if self.ai_capsule:
             self.ai_capsule.collapse()
-        # AI 收起后重新抢占键盘，防止按键穿透
-        self.grabKeyboard()
     
     def _match_hotkey(self, event) -> str:
         """匹配按键事件，返回动作名称"""
@@ -727,11 +716,6 @@ class ScreenshotOverlay(QWidget):
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif tool == 'text':
             self.setCursor(Qt.CursorShape.IBeamCursor)
-            # 文本工具激活时释放键盘抢占，确保 IME Shift 切换在整个文本工具使用期间都可用
-            self._release_keyboard_for_ime()
-        # 从文本工具切换到其他工具时恢复键盘抢占
-        if tool != 'text' and not (self.ai_capsule and self.ai_capsule.is_expanded()):
-            self.grabKeyboard()
     
     def _on_mark_color_changed(self, color):
         """标记颜色变化"""
@@ -744,17 +728,12 @@ class ScreenshotOverlay(QWidget):
             self.update()
     
     def _release_keyboard_for_ime(self):
-        """释放键盘抢占，让系统输入法（Shift 切中英等）正常工作。与 AI 输入框逻辑一致。"""
-        self.releaseKeyboard()
+        """不再需要——已移除 grabKeyboard()，IME 可以正常工作。保留方法避免调用点报错。"""
+        pass
 
     def _restore_keyboard_grab_after_ime(self):
-        """结束 IME 相关输入后恢复抢占，防止按键穿透到底层；AI 输入框展开时保持释放。"""
-        if self.ai_capsule and self.ai_capsule.is_expanded() and self.ai_capsule.input_field.hasFocus():
-            return
-        # 文本工具激活时不重新抢占键盘，确保 IME 的 Shift 中英切换在两次输入之间仍然可用
-        if self._mark_tool == 'text':
-            return
-        self.grabKeyboard()
+        """不再需要——已移除 grabKeyboard()。保留方法避免调用点报错。"""
+        pass
 
     def _start_temp_text_editing(self, pos: QPoint):
         """开始临时文本输入"""
@@ -767,7 +746,6 @@ class ScreenshotOverlay(QWidget):
         self._temp_text_cursor_visible = True
         self._temp_text_cursor_timer.start(530)
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
-        self._release_keyboard_for_ime()
         self.setFocus()
         self.update()
     
@@ -790,7 +768,6 @@ class ScreenshotOverlay(QWidget):
         self._temp_text_caret = 0
         self._temp_reedit_original = None
         self.update()
-        self._restore_keyboard_grab_after_ime()
 
     def _abort_temp_text_editing(self):
         """取消临时文本编辑（不提交新 TextMark）。"""
@@ -799,7 +776,6 @@ class ScreenshotOverlay(QWidget):
         self._temp_text_buffer = ""
         self._temp_text_preedit = ""
         self._temp_text_caret = 0
-        self._restore_keyboard_grab_after_ime()
         self.update()
     
     def _virtual_temp_edit_text(self) -> str:
@@ -1121,7 +1097,6 @@ class ScreenshotOverlay(QWidget):
                     self._temp_text_cursor_visible = True
                     self._temp_text_cursor_timer.start(530)
                     self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
-                    self._release_keyboard_for_ime()
                     self.setFocus()
                     self.update()
                 else:
@@ -1314,7 +1289,6 @@ class ScreenshotOverlay(QWidget):
         toolbar_rect = self._toolbar_buttons_rect()
         if not toolbar_rect.isNull() and toolbar_rect.contains(pos):
             self.ai_capsule.collapse()
-            self.grabKeyboard()
             return False
 
         # 其它区域不再误收起，也不触发选区操作
@@ -1803,7 +1777,6 @@ class ScreenshotOverlay(QWidget):
             self._temp_reedit_original = None
             self._temp_text_editing = False
             self._temp_text_cursor_timer.stop()
-            self._restore_keyboard_grab_after_ime()
         
         base_pixmap = self.full_screen_pixmap.copy(self._get_scaled_source_rect())
         
@@ -1968,9 +1941,9 @@ class ScreenshotOverlay(QWidget):
     def _open_prompt_editor(self):
         ScreenshotAICapsule.invalidate_prompts_cache()
         self._clear_ai_quick_buttons()
-        self.prompt_settings_window = SettingsDialog(self)
+        self.prompt_settings_window = SettingsDialog(None)
         self.prompt_settings_window.show_tab('prompt')
-        self.prompt_settings_window.show()
+        self.prompt_settings_window._ensure_on_screen()
         # 设置窗口关闭后，清除缓存并重建快捷按钮（确保显示最新 prompt）
         self.prompt_settings_window.finished.connect(self._on_prompt_editor_closed)
 

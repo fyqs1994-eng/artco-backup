@@ -13,7 +13,7 @@ from .marks import MarkObject, NumberDot, RectMark, ArrowMark, FreehandMark, Tex
 
 class EditorCanvas(QWidget):
     """可交互画布"""
-    
+
     TOOL_SELECT = 0
     TOOL_NUMBER = 1
     TOOL_RECT = 2
@@ -21,7 +21,7 @@ class EditorCanvas(QWidget):
     TOOL_FREEHAND = 4
     TOOL_TEXT = 5
     TOOL_ERASER = 6
-    
+
     # 信号：缩放变化、平移请求、序号点变化
     scale_changed = Signal(float)
     pan_requested = Signal(int, int)  # delta_x, delta_y
@@ -29,7 +29,7 @@ class EditorCanvas(QWidget):
     number_dots_renumbered = Signal(dict, int)  # 序号点重编号时触发，携带 ({old: new}, deleted_number)
     number_dot_clicked = Signal(int)  # 点击序号点时触发
 
-    
+
     def __init__(self, pixmap: QPixmap):
         super().__init__()
         self.original_pixmap = pixmap
@@ -42,31 +42,35 @@ class EditorCanvas(QWidget):
         )
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        
+
         # 缩放相关
         self._scale = 1.0
         self._min_scale = 0.25
         self._max_scale = 4.0
         self._update_canvas_size()
-        
+
         self.marks: list[MarkObject] = []
         self.current_tool = self.TOOL_SELECT
         self.number_counter = 1
-        
+
         # 撤销栈
         self._undo_stack: list[tuple] = []  # [(action, data), ...]
         self._max_undo = 50
-        
-        # 中键平移
+
+# 中键平移
         self._is_panning = False
         self._pan_start = QPoint()
-        
+
+        # 空格平移
+        self._space_panning = False
+        self._space_pan_last = QPoint()
+
         self.selected_mark: MarkObject = None
         self.is_drawing = False
         self.draw_start = QPoint()
         self.temp_points = []
         self._mark_color = QColor(255, 50, 50)  # 当前标记颜色
-        
+
         # 即时渲染文本输入状态
         self._text_font_size = TextMark.default_font_size
         self._text_editing = False  # 是否正在输入文字
@@ -77,13 +81,13 @@ class EditorCanvas(QWidget):
         self._text_cursor_timer.timeout.connect(self._toggle_text_cursor)
         self.editing_text_mark: TextMark = None
         self._text_caret = 0  # 插入光标在 _text_buffer 中的位置 0..len
-    
+
     def _update_canvas_size(self):
         """根据缩放更新画布大小"""
         new_width = int(self.base_size.width() * self._scale)
         new_height = int(self.base_size.height() * self._scale)
         self.setFixedSize(new_width, new_height)
-    
+
     def set_scale(self, scale: float):
         """设置缩放比例"""
         scale = max(self._min_scale, min(self._max_scale, scale))
@@ -93,31 +97,31 @@ class EditorCanvas(QWidget):
         self._update_canvas_size()
         self.scale_changed.emit(self._scale)
         self.update()
-    
+
     def zoom_in(self):
         """放大"""
         self.set_scale(self._scale * 1.2)
-    
+
     def zoom_out(self):
         """缩小"""
         self.set_scale(self._scale / 1.2)
-    
+
     def zoom_reset(self):
         """重置缩放"""
         self.set_scale(1.0)
-    
+
     def _push_undo(self, action: str, data):
         """添加撤销记录"""
         self._undo_stack.append((action, data))
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
-    
+
     def undo(self):
         """撤销操作"""
         if not self._undo_stack:
             return
         action, data = self._undo_stack.pop()
-        
+
         if action == 'add':
             # 撤销添加 -> 删除
             mark = data
@@ -152,13 +156,13 @@ class EditorCanvas(QWidget):
         elif action == 'edit_text':
             mark, old_text = data
             mark.text = old_text
-        
+
         self._deselect_all()
         self.update()
-    
+
     def _renumber_dots(self, deleted_number: int = None):
         """重新编号所有序号点
-        
+
         deleted_number: 被删除的序号点编号（如果有），用于通知侧栏清理对应注释
         """
         dots = [m for m in self.marks if isinstance(m, NumberDot)]
@@ -172,11 +176,11 @@ class EditorCanvas(QWidget):
             # 有编号变化或删除，先发重编号信号（携带映射和被删编号），再发通用变化信号
             self.number_dots_renumbered.emit(old_to_new, deleted_number if deleted_number else -1)
         self.number_dots_changed.emit()  # 通知序号点变化
-    
+
     def set_mark_color(self, color: QColor):
         """设置当前标记颜色"""
         self._mark_color = color
-    
+
     def set_tool(self, tool: int):
         self.current_tool = tool
         self._finish_text_editing()
@@ -187,26 +191,26 @@ class EditorCanvas(QWidget):
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
-    
+
     def _deselect_all(self):
         for m in self.marks:
             m.selected = False
         self.selected_mark = None
-    
+
     def _find_mark_at(self, pos: QPoint) -> MarkObject:
         for mark in reversed(self.marks):
             if mark.contains(pos):
                 return mark
         return None
-    
+
     def _screen_to_canvas(self, pos: QPoint) -> QPoint:
         """屏幕坐标转画布坐标（考虑缩放）"""
         return QPoint(int(pos.x() / self._scale), int(pos.y() / self._scale))
-    
+
     def _canvas_to_screen(self, pos: QPoint) -> QPoint:
         """画布坐标转屏幕坐标"""
         return QPoint(int(pos.x() * self._scale), int(pos.y() * self._scale))
-    
+
     def delete_selected(self):
         if self.selected_mark and self.selected_mark in self.marks:
             index = self.marks.index(self.selected_mark)
@@ -220,7 +224,7 @@ class EditorCanvas(QWidget):
                 self._renumber_dots(deleted_number)
             self.selected_mark = None
             self.update()
-    
+
     def _erase_mark_at(self, pos: QPoint):
         """橡皮擦：删除指定位置的标记"""
         mark = self._find_mark_at(pos)
@@ -235,32 +239,32 @@ class EditorCanvas(QWidget):
             if isinstance(mark, NumberDot):
                 self._renumber_dots(deleted_number)
             self.update()
-    
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)  # 高质量缩放
-        
+
         # 绘制背景图 - 直接绘制到当前画布大小，忽略 devicePixelRatio
         # 因为画布大小已经是逻辑尺寸 * _scale
         painter.drawPixmap(self.rect(), self.original_pixmap)
-        
+
         # 应用缩放变换绘制标记
         painter.scale(self._scale, self._scale)
-        
+
         for mark in self.marks:
             # 正在编辑的文本标记不绘制（由即时渲染绘制）
             if mark == self.editing_text_mark and self._text_editing:
                 continue
             mark.draw(painter)
-        
+
         # 即时渲染正在输入的文本
         if self._text_editing and self.editing_text_mark:
             self._draw_editing_text(painter)
-        
+
         if self.is_drawing:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
+
             if self.current_tool == self.TOOL_RECT:
                 pen = QPen(self._mark_color, 3)
                 painter.setPen(pen)
@@ -305,7 +309,7 @@ class EditorCanvas(QWidget):
                         path.quadTo(QPointF(pts[i].x(), pts[i].y()), mid)
                     path.lineTo(pts[-1])
                 painter.drawPath(path)
-    
+
     @staticmethod
     def _caret_geometry_in_text(text: str, index: int, metrics: QFontMetrics, base_x: float, base_y: float):
         """返回插入光标竖线顶点的 x、y 与行高（text 为含换行的完整虚拟串）。"""
@@ -384,13 +388,13 @@ class EditorCanvas(QWidget):
             cx, cy_top, lh = self._caret_geometry_in_text(virtual, cursor_index, metrics, base_x, base_y)
             painter.setPen(QPen(mark.color, 2))
             painter.drawLine(int(cx), int(cy_top), int(cx), int(cy_top + lh))
-    
+
     def _toggle_text_cursor(self):
         """切换光标可见性"""
         self._text_cursor_visible = not self._text_cursor_visible
         if self._text_editing:
             self.update()
-    
+
     def mousePressEvent(self, event):
         # 中键按下 - 开始平移
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -398,14 +402,14 @@ class EditorCanvas(QWidget):
             self._pan_start = event.globalPosition().toPoint()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        
+
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        
+
         screen_pos = event.pos()
         pos = self._screen_to_canvas(screen_pos)  # 转换为画布坐标
         self._finish_text_editing()
-        
+
         if self.current_tool == self.TOOL_SELECT:
             self._deselect_all()
             mark = self._find_mark_at(pos)
@@ -428,10 +432,10 @@ class EditorCanvas(QWidget):
                     self._move_start_pos = QPoint(mark.pos)
             self.update()
 
-        
+
         elif self.current_tool == self.TOOL_ERASER:
             self._erase_mark_at(pos)
-        
+
         elif self.current_tool == self.TOOL_NUMBER:
             dot = NumberDot(pos, self.number_counter, self._mark_color)
             self.marks.append(dot)
@@ -439,16 +443,16 @@ class EditorCanvas(QWidget):
             self.number_counter += 1
             self.number_dots_changed.emit()  # 通知序号点变化
             self.update()
-        
+
         elif self.current_tool in (self.TOOL_RECT, self.TOOL_ARROW):
             self.is_drawing = True
             self.draw_start = pos
             self.draw_end = pos
-        
+
         elif self.current_tool == self.TOOL_FREEHAND:
             self.is_drawing = True
             self.temp_points = [pos]
-        
+
         elif self.current_tool == self.TOOL_TEXT:
             existing = self._find_mark_at(pos)
             if isinstance(existing, TextMark):
@@ -459,7 +463,7 @@ class EditorCanvas(QWidget):
                 self._push_undo('add', text_mark)
                 self.editing_text_mark = text_mark
                 self._start_text_editing()
-    
+
     def mouseDoubleClickEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -489,6 +493,14 @@ class EditorCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
+        # 空格平移
+        if self._space_panning:
+            cur = event.globalPosition().toPoint()
+            delta = cur - self._space_pan_last
+            self._space_pan_last = cur
+            self.pan_requested.emit(delta.x(), delta.y())
+            return
+
         # 中键平移
         if self._is_panning and event.buttons() & Qt.MouseButton.MiddleButton:
             current_pos = event.globalPosition().toPoint()
@@ -496,19 +508,19 @@ class EditorCanvas(QWidget):
             self._pan_start = current_pos
             self.pan_requested.emit(delta.x(), delta.y())
             return
-        
+
         screen_pos = event.pos()
         pos = self._screen_to_canvas(screen_pos)  # 转换为画布坐标
-        
+
         if self.current_tool == self.TOOL_SELECT and self.selected_mark and event.buttons() & Qt.MouseButton.LeftButton:
             delta = pos - self.drag_start
             self.selected_mark.move_by(delta)
             self.drag_start = pos
             self.update()
-        
+
         elif self.current_tool == self.TOOL_ERASER and event.buttons() & Qt.MouseButton.LeftButton:
             self._erase_mark_at(pos)
-        
+
         elif self.is_drawing:
             if self.current_tool in (self.TOOL_RECT, self.TOOL_ARROW):
                 self.draw_end = pos
@@ -520,7 +532,7 @@ class EditorCanvas(QWidget):
                         return
                 self.temp_points.append(pos)
             self.update()
-    
+
     def mouseReleaseEvent(self, event):
         # 中键释放 - 结束平移
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -531,13 +543,13 @@ class EditorCanvas(QWidget):
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
             return
-        
+
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        
+
         screen_pos = event.pos()
         pos = self._screen_to_canvas(screen_pos)  # 转换为画布坐标
-        
+
         # 选择工具：记录移动操作到撤销栈
         if self.current_tool == self.TOOL_SELECT and self.selected_mark and hasattr(self, '_move_start_pos'):
             mark = self.selected_mark
@@ -554,11 +566,11 @@ class EditorCanvas(QWidget):
                 moved = True
             elif isinstance(mark, TextMark) and mark.pos != self._move_start_pos:
                 moved = True
-            
+
             if moved:
                 self._push_undo('move', (mark, self._move_start_pos))
             delattr(self, '_move_start_pos')
-        
+
         if self.is_drawing:
             if self.current_tool == self.TOOL_RECT:
                 rect = QRect(self.draw_start, pos).normalized()
@@ -566,23 +578,23 @@ class EditorCanvas(QWidget):
                     mark = RectMark(rect, self._mark_color)
                     self.marks.append(mark)
                     self._push_undo('add', mark)
-            
+
             elif self.current_tool == self.TOOL_ARROW:
                 if (pos - self.draw_start).manhattanLength() > 10:
                     mark = ArrowMark(self.draw_start, pos, self._mark_color)
                     self.marks.append(mark)
                     self._push_undo('add', mark)
-            
+
             elif self.current_tool == self.TOOL_FREEHAND:
                 if len(self.temp_points) > 2:
                     mark = FreehandMark(self.temp_points.copy(), self._mark_color)
                     self.marks.append(mark)
                     self._push_undo('add', mark)
                 self.temp_points = []
-            
+
             self.is_drawing = False
             self.update()
-    
+
     def wheelEvent(self, event):
         """滚轮事件"""
         # 文本输入时 Ctrl+滚轮调整字体大小
@@ -591,7 +603,7 @@ class EditorCanvas(QWidget):
             self._change_text_font_size(delta)
             event.accept()
             return
-        
+
         # 普通滚轮缩放
         delta = event.angleDelta().y()
         if delta > 0:
@@ -599,7 +611,7 @@ class EditorCanvas(QWidget):
         else:
             self.zoom_out()
         event.accept()
-    
+
     def _start_text_editing(self):
         """开始文本即时渲染输入"""
         self._text_editing = True
@@ -615,12 +627,12 @@ class EditorCanvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self.setFocus()
         self.update()
-    
+
     def _finish_text_editing(self):
         """完成文本输入"""
         if not self._text_editing:
             return
-        
+
         self._text_cursor_timer.stop()
         self._text_editing = False
         self._text_preedit = ""
@@ -640,7 +652,7 @@ class EditorCanvas(QWidget):
                         self._undo_stack.pop()
             self.editing_text_mark.is_editing = False
             self.editing_text_mark = None
-        
+
         self._text_edit_old_text = None
         self._text_buffer = ""
         self._text_caret = 0
@@ -658,7 +670,7 @@ class EditorCanvas(QWidget):
         self._text_buffer = ""
         self._text_caret = 0
         self.update()
-    
+
     def _change_text_font_size(self, delta: int):
         """调整文本字体大小"""
         old_size = self._text_font_size
@@ -706,14 +718,22 @@ class EditorCanvas(QWidget):
         next_line_end = len(buf) if next_nl < 0 else next_nl
         next_len = next_line_end - next_line_start
         self._text_caret = next_line_start + min(col, next_len)
-    
+
     def keyPressEvent(self, event: QKeyEvent):
         """键盘事件 - 处理即时渲染文本输入"""
+        # 空格键按住所按住平移（非文本编辑态）
+        if not self._text_editing and event.key() == Qt.Key.Key_Space:
+            self._space_panning = True
+            self._space_pan_last = event.globalPosition().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         # 如果正在输入文本
         if self._text_editing:
             key = event.key()
             modifiers = event.modifiers()
-            
+
             if key == Qt.Key.Key_Return:
                 if modifiers & Qt.KeyboardModifier.ControlModifier:
                     # Ctrl+Enter 换行
@@ -728,7 +748,7 @@ class EditorCanvas(QWidget):
                     # Enter 确认
                     self._finish_text_editing()
                 return
-            
+
             elif key == Qt.Key.Key_Escape:
                 if getattr(self, '_text_edit_old_text', None) is not None:
                     self.editing_text_mark.text = self._text_edit_old_text
@@ -739,7 +759,7 @@ class EditorCanvas(QWidget):
                     self._text_caret = 0
                     self._finish_text_editing()
                 return
-            
+
             elif key == Qt.Key.Key_Backspace:
                 if self._text_preedit:
                     event.ignore()
@@ -784,7 +804,7 @@ class EditorCanvas(QWidget):
                 self._text_cursor_visible = True
                 self.update()
                 return
-            
+
             else:
                 # 修饰键、无字符键交给系统/输入法（避免 Shift 切换中英被吞）
                 if key in (
@@ -807,7 +827,7 @@ class EditorCanvas(QWidget):
                 else:
                     event.ignore()
                 return
-        
+
         # 非文本输入状态的快捷键
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
             self.delete_selected()
@@ -815,7 +835,20 @@ class EditorCanvas(QWidget):
             self.undo()
         else:
             super().keyPressEvent(event)
-    
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        """松开空格键结束平移，恢复光标。"""
+        if event.key() == Qt.Key.Key_Space:
+            if self._space_panning:
+                self._space_panning = False
+                if self.current_tool == self.TOOL_ERASER:
+                    self.setCursor(Qt.CursorShape.CrossCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def inputMethodEvent(self, event):
         """处理输入法事件（中文等IME输入）"""
         if self._text_editing:
@@ -834,7 +867,7 @@ class EditorCanvas(QWidget):
             event.accept()
         else:
             super().inputMethodEvent(event)
-    
+
     def inputMethodQuery(self, query):
         """提供输入法查询信息（光标位置等）"""
         from PySide6.QtCore import Qt

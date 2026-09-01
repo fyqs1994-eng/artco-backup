@@ -15,13 +15,35 @@ from PySide6.QtWidgets import (
     QComboBox, QMenu, QStackedWidget, QToolButton,
     QListWidget, QListWidgetItem, QSizePolicy,
     QProgressDialog, QFileDialog, QSlider, QSpinBox, QGridLayout,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QApplication, QTextEdit, QRadioButton, QCheckBox,
 )
 from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer
 from PySide6.QtGui import QKeySequence, QColor
 import qtawesome as qta
 
-from config import AI_MODELS, ai_config, wecom_config, ps_config, appearance_config, PRESET_SCHEMES
+# ── qfluentwidgets 集中安全导入 ──
+# 该库在模块级执行 print(ALERT)，若进程无控制台句柄（pythonw / 无窗口启动）
+# 会抛 OSError(WinError 6)，导致设置面板完全无法创建。
+# 这里集中导入一次，失败则整体降级为 PySide6 原生控件。
+_QF_AVAILABLE = False
+try:
+    from qfluentwidgets import (
+        PushButton, PrimaryPushButton, LineEdit, TextEdit,
+        RadioButton, CheckBox, ComboBox, EditableComboBox,
+    )
+    _QF_AVAILABLE = True
+except Exception:
+    # 降级：用原生控件替代，保证设置面板始终可用
+    PushButton = QPushButton
+    PrimaryPushButton = QPushButton
+    LineEdit = QLineEdit
+    TextEdit = QTextEdit          # 必须是 QTextEdit（需支持 setPlainText）
+    RadioButton = QRadioButton
+    CheckBox = QCheckBox
+    ComboBox = QComboBox
+    EditableComboBox = QComboBox
+
+from config import AI_MODELS, ai_config, model_classifier, wecom_config, ps_config, appearance_config, PRESET_SCHEMES
 from utils import hotkey_manager
 from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
@@ -202,6 +224,36 @@ class _PromptRow(QWidget):
         super().leaveEvent(event)
 
 
+class _ProviderRow(QWidget):
+    """服务商列表行：状态圆点 + 名称 + 默认标记"""
+
+    def __init__(self, name: str, has_key: bool, is_default: bool, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:transparent;")
+        rl = QHBoxLayout(self)
+        rl.setContentsMargins(10, 0, 8, 0)
+        rl.setSpacing(8)
+
+        # 状态圆点
+        dot_color = "#52c41a" if has_key else "#d9d9d9"
+        self._dot = QLabel()
+        self._dot.setFixedSize(8, 8)
+        self._dot.setStyleSheet(f"background:{dot_color}; border-radius:4px;")
+        rl.addWidget(self._dot)
+
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:13px;")
+        rl.addWidget(name_lbl, 1)
+
+        if is_default:
+            badge = QLabel("默认")
+            badge.setStyleSheet(
+                f"color:{ACCENT_PRIMARY}; font-size:10px;"
+                f"border:1px solid {ACCENT_PRIMARY}; border-radius:3px; padding:1px 4px;"
+            )
+            rl.addWidget(badge)
+
+
 # ══════════════════════════════════════════════════════════════
 class SettingsDialog(QDialog):
     """设置对话框 — Raycast 风格"""
@@ -218,15 +270,86 @@ class SettingsDialog(QDialog):
         self._prompt_data: list = []
         self._update_check_timer = None
         self.update_check_result.connect(self._on_check_result)
+        # 异步拉取 OpenRouter 模型缓存（后台线程，不阻塞 UI）
+        model_classifier.ensure_cache_ready()
         self.init_ui()
+
+    def _ensure_on_screen(self):
+        """确保对话框完整可见：取消最小化/最大化，并夹紧到屏幕可用区域内"""
+        try:
+            # 清除 reject()/close() 残留的隐藏状态，否则后续 show() 可能为空操作
+            try:
+                self.setAttribute(Qt.WidgetAttribute.WA_WState_Hidden, False)
+            except Exception:
+                pass
+
+            if self.isMinimized():
+                self.showNormal()
+            if self.windowState() == Qt.WindowState.WindowFullScreen:
+                self.showNormal()
+
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                return
+            avail = screen.availableGeometry()
+
+            # 窗口尺寸不超过可用区域
+            w = min(self.width(), avail.width())
+            h = min(self.height(), avail.height())
+            self.resize(w, h)
+
+            geo = self.frameGeometry()
+            # 计算目标位置，使其居中于可用区域
+            x = avail.x() + max(0, (avail.width() - w) // 2)
+            y = avail.y() + max(0, (avail.height() - h) // 2)
+
+            # 若窗口已基本在屏幕内则保留原位置，否则移到居中位置
+            inside = (
+                geo.x() >= avail.x() - 40
+                and geo.y() >= avail.y() - 40
+                and geo.right() <= avail.right() + 40
+                and geo.bottom() <= avail.bottom() + 40
+            )
+            if not inside:
+                self.move(x, y)
+
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+            # ── 兜底：Qt 的 isVisible() 与操作系统的真实状态可能撕裂。
+            #    实测复用同一实例时出现 Qt isVisible()=True 但
+            #    IsWindowVisible()=False：Qt 自认为已显示，于是把 show()
+            #    当空操作跳过，从未向系统下发真正的显示指令，用户看不到窗口。
+            #    因此判断依据必须是操作系统的事实，而非 Qt 的自述。
+            try:
+                if sys.platform == 'win32':
+                    import ctypes
+                    hwnd = int(self.winId())
+                    user32 = ctypes.windll.user32
+                    if not user32.IsWindowVisible(hwnd):
+                        SW_RESTORE, SW_SHOW = 9, 5
+                        if user32.IsIconic(hwnd):
+                            user32.ShowWindow(hwnd, SW_RESTORE)
+                        user32.ShowWindow(hwnd, SW_SHOW)
+                        user32.SetWindowPos(
+                            hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+                        user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
     # ══════════════════════════════════════════════════════
     #  UI 主体
     # ══════════════════════════════════════════════════════
 
     def init_ui(self):
+        # 说明：qfluentwidgets 已在模块顶部集中安全导入（见文件头），
+        # 此处直接使用模块级 PushButton / PrimaryPushButton，
+        # 避免在函数内重复导入触发无控制台时的 OSError(WinError 6)。
         os.environ.setdefault("QT_API", "pyside6")
-        from qfluentwidgets import PushButton, PrimaryPushButton
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -394,52 +517,102 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def _build_ai_page(self):
-        from qfluentwidgets import PushButton, ComboBox
+        # PushButton 已在模块顶部集中安全导入
 
-        page, lay = self._scroll_page()
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
-        # section: 服务商
-        lay.addWidget(self._section("服务商"))
-        lay.addSpacing(_SEC_GAP)
+        outer = QWidget()
+        outer.setObjectName("rc_page_bg")
+        oh = QHBoxLayout(outer)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(0)
+        oh.addStretch(1)
 
-        combo_w = QWidget()
-        ch = QHBoxLayout(combo_w)
-        ch.setContentsMargins(0, 0, 0, 0)
-        ch.setSpacing(8)
-        self.provider_combo = ComboBox()
-        self.provider_combo.setMinimumWidth(180)
-        self.provider_combo.setFixedHeight(_ROW_H)
-        self._refresh_provider_combo()
-        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
-        ch.addWidget(self.provider_combo, 1)
+        wrapper = QWidget()
+        wrapper.setFixedWidth(650)
+        h = QHBoxLayout(wrapper)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
 
-        self.btn_add_provider = PushButton("+")
+        # ── 左栏：服务商列表 ──
+        left = QWidget()
+        left.setFixedWidth(180)
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(16, _PAGE_TB, 12, 16)
+        ll.setSpacing(8)
+
+        # section label
+        sec_lbl = QLabel("服务商")
+        sec_lbl.setStyleSheet(f"color:{_SEC_COLOR}; font-size:13px; font-weight:600; padding-left:4px;")
+        ll.addWidget(sec_lbl)
+
+        self._provider_list = QListWidget()
+        self._provider_list.setObjectName("ai_provider_list")
+        self._provider_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._provider_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._provider_list.currentRowChanged.connect(self._on_provider_list_changed)
+        ll.addWidget(self._provider_list, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+        self.btn_add_provider = QToolButton()
+        self.btn_add_provider.setObjectName("icon_btn")
+        self.btn_add_provider.setIcon(qta.icon('mdi6.plus', color=ACCENT_PRIMARY))
+        self.btn_add_provider.setIconSize(QSize(16, 16))
         self.btn_add_provider.setFixedSize(_ROW_H, _ROW_H)
-        self.btn_add_provider.setToolTip("添加服务商")
+        self.btn_add_provider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_provider.setToolTip("添加")
         self.btn_add_provider.clicked.connect(self._add_provider)
-        ch.addWidget(self.btn_add_provider)
-        self.btn_remove_provider = PushButton("−")
+        btn_row.addWidget(self.btn_add_provider)
+        self.btn_remove_provider = QToolButton()
+        self.btn_remove_provider.setObjectName("icon_btn")
+        self.btn_remove_provider.setIcon(qta.icon('mdi6.trash-can', color=COLOR_ERROR))
+        self.btn_remove_provider.setIconSize(QSize(16, 16))
         self.btn_remove_provider.setFixedSize(_ROW_H, _ROW_H)
-        self.btn_remove_provider.setToolTip("删除服务商")
+        self.btn_remove_provider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_remove_provider.setToolTip("删除")
         self.btn_remove_provider.clicked.connect(self._remove_provider)
-        ch.addWidget(self.btn_remove_provider)
+        btn_row.addWidget(self.btn_remove_provider)
+        btn_row.addStretch()
+        ll.addLayout(btn_row)
 
-        lay.addLayout(self._form_row("当前服务商", combo_w))
-        lay.addSpacing(_ROW_GAP)
+        h.addWidget(left)
 
-        # 动态详情容器
+        # 竖分割线
+        vline = QFrame()
+        vline.setFrameShape(QFrame.Shape.VLine)
+        vline.setFixedWidth(1)
+        vline.setStyleSheet(f"color:{_SEPARATOR};")
+        h.addWidget(vline)
+
+        # ── 右栏：详情面板 ──
         self._ai_detail = QWidget()
         self._ai_detail_lay = QVBoxLayout(self._ai_detail)
-        self._ai_detail_lay.setContentsMargins(0, 0, 0, 0)
+        self._ai_detail_lay.setContentsMargins(_PAGE_LR, _PAGE_TB, _PAGE_LR, _PAGE_TB)
         self._ai_detail_lay.setSpacing(0)
-        lay.addWidget(self._ai_detail)
+        h.addWidget(self._ai_detail, 1)
 
-        lay.addStretch()
+        oh.addWidget(wrapper)
+        oh.addStretch(1)
+        page.setWidget(outer)
 
-        enabled = ai_config.get_enabled_providers()
-        if enabled:
-            self.provider_combo.setCurrentIndex(0)
-            self._on_provider_changed(0)
+        self._refresh_provider_list()
+        # 进入界面时默认选中当前默认供应商
+        default_pid = ai_config.get_current_provider_selected()
+        default_row = -1
+        for i in range(self._provider_list.count()):
+            if self._provider_list.item(i).data(Qt.ItemDataRole.UserRole) == default_pid:
+                default_row = i
+                break
+        if default_row >= 0:
+            self._provider_list.setCurrentRow(default_row)
+        elif self._provider_list.count() > 0:
+            self._provider_list.setCurrentRow(0)
 
         return page
 
@@ -448,12 +621,14 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def _build_prompt_page(self):
-        from qfluentwidgets import PushButton, PrimaryPushButton, LineEdit, TextEdit, RadioButton, CheckBox
+        # PushButton/PrimaryPushButton/LineEdit/TextEdit/RadioButton/CheckBox
+        # 已在模块顶部集中安全导入
 
         page = QScrollArea()
         page.setWidgetResizable(True)
         page.setFrameShape(QFrame.Shape.NoFrame)
         page.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
         outer = QWidget()
         outer.setObjectName("rc_page_bg")
@@ -473,28 +648,41 @@ class SettingsDialog(QDialog):
 
         # ── 左栏：列表 ──
         left = QWidget()
-        left.setFixedWidth(220)
+        left.setFixedWidth(180)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(16, _PAGE_TB, 12, 16)
         ll.setSpacing(8)
 
+        sec_lbl = QLabel("Prompt")
+        sec_lbl.setStyleSheet(f"color:{_SEC_COLOR}; font-size:13px; font-weight:600; padding-left:4px;")
+        ll.addWidget(sec_lbl)
+
         self._prompt_list = QListWidget()
         self._prompt_list.setObjectName("pm_list")
+        self._prompt_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._prompt_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._prompt_list.currentRowChanged.connect(self._on_prompt_selected)
         ll.addWidget(self._prompt_list, 1)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(6)
-        btn_add = PushButton("新增")
+        btn_add = QToolButton()
+        btn_add.setObjectName("icon_btn")
         btn_add.setIcon(qta.icon('mdi6.plus', color=ACCENT_PRIMARY))
-        btn_add.setFixedHeight(_ROW_H)
+        btn_add.setIconSize(QSize(16, 16))
+        btn_add.setFixedSize(_ROW_H, _ROW_H)
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_add.setToolTip("新增")
         btn_add.clicked.connect(self._add_prompt)
         btn_row.addWidget(btn_add)
-        btn_del = PushButton("删除")
+        btn_del = QToolButton()
+        btn_del.setObjectName("icon_btn")
         btn_del.setIcon(qta.icon('mdi6.trash-can', color=COLOR_ERROR))
-        btn_del.setFixedHeight(_ROW_H)
+        btn_del.setIconSize(QSize(16, 16))
+        btn_del.setFixedSize(_ROW_H, _ROW_H)
         btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_del.setToolTip("删除")
         btn_del.clicked.connect(self._delete_prompt)
         btn_row.addWidget(btn_del)
         btn_row.addStretch()
@@ -578,7 +766,7 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def _build_hotkey_page(self):
-        from qfluentwidgets import PushButton
+        # PushButton 已在模块顶部集中安全导入
 
         page, lay = self._scroll_page()
 
@@ -655,7 +843,7 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def _build_appearance_page(self):
-        from qfluentwidgets import PushButton, PrimaryPushButton
+        # PushButton / PrimaryPushButton 已在模块顶部集中安全导入
 
         page, lay = self._scroll_page()
 
@@ -780,7 +968,7 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def _build_general_page(self):
-        from qfluentwidgets import CheckBox, ComboBox
+        # CheckBox / ComboBox 已在模块顶部集中安全导入
 
         page, lay = self._scroll_page()
 
@@ -833,8 +1021,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(version_label)
         lay.addSpacing(8)
 
-        from qfluentwidgets import PushButton as QFPushButton
-        self.btn_check_update = QFPushButton("检查更新")
+        self.btn_check_update = PushButton("检查更新")
         self.btn_check_update.setIcon(qta.icon('mdi6.cloud-download-outline', color=ACCENT_PRIMARY))
         self.btn_check_update.setFixedHeight(_ROW_H)
         self.btn_check_update.setFixedWidth(120)
@@ -853,55 +1040,165 @@ class SettingsDialog(QDialog):
     #  AI 服务商
     # ══════════════════════════════════════════════════════
 
-    def _refresh_provider_combo(self):
+    def _get_provider_info(self, provider_id):
+        """统一获取服务商信息（预设 + 自定义），返回 dict 或 None"""
         from config import AI_PROVIDERS
-        self.provider_combo.blockSignals(True)
-        self.provider_combo.clear()
-        for pid in ai_config.get_enabled_providers():
-            if pid in AI_PROVIDERS:
-                self.provider_combo.addItem(AI_PROVIDERS[pid]["name"], pid)
-        self.provider_combo.blockSignals(False)
+        if provider_id in AI_PROVIDERS:
+            p = AI_PROVIDERS[provider_id]
+            return {
+                "name": p["name"],
+                "models": p.get("models", []),
+                "key_url": p.get("key_url", ""),
+                "default_vision": p.get("default_vision", ""),
+                "default_image_gen": p.get("default_image_gen", ""),
+                "is_custom": False,
+            }
+        custom = ai_config.get_custom_provider_info(provider_id)
+        if custom:
+            return {
+                "name": custom["name"],
+                "models": [],
+                "key_url": custom.get("key_url", ""),
+                "default_vision": custom.get("vision_models", [""])[0] if custom.get("vision_models") else "",
+                "default_image_gen": custom.get("image_gen_models", [""])[0] if custom.get("image_gen_models") else "",
+                "is_custom": True,
+                "base_url": custom.get("base_url", ""),
+                "vision_models": custom.get("vision_models", []),
+                "image_gen_models": custom.get("image_gen_models", []),
+            }
+        return None
 
-    def _on_provider_changed(self, index: int):
+    def _refresh_provider_list(self):
+        """刷新左侧服务商列表"""
+        current_pid = self._current_provider_detail
+        self._provider_list.blockSignals(True)
+        self._provider_list.clear()
+
         enabled = ai_config.get_enabled_providers()
-        if index < 0 or index >= len(enabled):
+        current_selected = ai_config.get_current_provider_selected()
+        restore_row = -1
+
+        # 按是否有 API key 分组：有 key 的在上（按新建顺序），无 key 的在下（按新建顺序）
+        with_key = []
+        without_key = []
+        for pid in enabled:
+            if ai_config.get_api_key(pid):
+                with_key.append(pid)
+            else:
+                without_key.append(pid)
+        ordered = with_key + without_key
+
+        for i, pid in enumerate(ordered):
+            info = self._get_provider_info(pid)
+            if not info:
+                continue
+            name = info["name"]
+            has_key = bool(ai_config.get_api_key(pid))
+            is_default = pid == current_selected
+
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, pid)
+            item.setSizeHint(QSize(0, 42))
+            self._provider_list.addItem(item)
+
+            row_w = _ProviderRow(name, has_key, is_default)
+            self._provider_list.setItemWidget(item, row_w)
+
+            if pid == current_pid:
+                restore_row = i
+
+        self._provider_list.blockSignals(False)
+
+        if restore_row >= 0:
+            self._provider_list.setCurrentRow(restore_row)
+        elif self._provider_list.count() > 0:
+            self._provider_list.setCurrentRow(0)
+
+    def _on_provider_list_changed(self, row: int):
+        """列表选中行变化时，显示对应服务商详情"""
+        if row < 0:
             return
-        pid = enabled[index]
+        item = self._provider_list.item(row)
+        if not item:
+            return
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if not pid:
+            return
         self._current_provider_detail = pid
         self._show_provider_detail(pid)
 
     def _show_provider_detail(self, provider_id):
-        from config import AI_PROVIDERS
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
-        from qfluentwidgets import LineEdit, PushButton, ComboBox
+        # LineEdit / PushButton / ComboBox / EditableComboBox 已在模块顶部集中安全导入
 
         self._clear_layout(self._ai_detail_lay)
 
-        provider = AI_PROVIDERS.get(provider_id)
+        provider = self._get_provider_info(provider_id)
         if not provider:
             return
 
         L = self._ai_detail_lay
         is_current = provider_id == ai_config.get_current_provider_selected()
 
-        # 默认状态
+        # 服务商标题行：名称 + 默认徽章 + 右侧紧凑按钮
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_lbl = QLabel(provider["name"])
+        title_lbl.setStyleSheet(f"color:{TEXT_PRIMARY}; font-size:16px; font-weight:600;")
+        title_row.addWidget(title_lbl)
         if is_current:
-            st = QLabel("✓ 当前默认服务商")
-            st.setStyleSheet("color:#52c41a; font-size:13px; font-weight:500;")
-            L.addLayout(self._form_row("", st))
+            badge = QLabel("默认")
+            badge.setStyleSheet(
+                f"color:{ACCENT_PRIMARY}; font-size:10px;"
+                f"background:{ACCENT_SUBTLE}; border-radius:3px; padding:2px 6px;"
+            )
+            title_row.addWidget(badge)
+        title_row.addStretch()
+        # 紧凑设为默认按钮（右上角）
+        if is_current:
+            self._btn_set_default = QToolButton()
+            self._btn_set_default.setObjectName("icon_btn")
+            self._btn_set_default.setProperty("locked", True)
+            self._btn_set_default.setIcon(qta.icon('mdi6.star', color='#FFB800'))
+            self._btn_set_default.setIconSize(QSize(16, 16))
+            self._btn_set_default.setFixedSize(_ROW_H, _ROW_H)
+            self._btn_set_default.setToolTip("当前默认服务商")
+            title_row.addWidget(self._btn_set_default)
         else:
-            self._btn_set_default = PushButton("设为默认服务商")
-            self._btn_set_default.setFixedHeight(_ROW_H)
+            self._btn_set_default = QToolButton()
+            self._btn_set_default.setObjectName("icon_btn")
+            self._btn_set_default.setIcon(qta.icon('mdi6.star-outline', color=TEXT_TERTIARY))
+            self._btn_set_default.setIconSize(QSize(16, 16))
+            self._btn_set_default.setFixedSize(_ROW_H, _ROW_H)
+            self._btn_set_default.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_set_default.setToolTip("设为默认")
             self._btn_set_default.clicked.connect(lambda: self._set_default_provider(provider_id))
-            L.addLayout(self._form_row("", self._btn_set_default))
-
+            title_row.addWidget(self._btn_set_default)
+        # 获取 key 链接按钮（问号图标，放在设为默认按钮右侧）
+        self._key_url = provider.get("key_url", "")
+        if self._key_url:
+            self._btn_get_key = QToolButton()
+            self._btn_get_key.setObjectName("icon_btn")
+            self._btn_get_key.setIcon(qta.icon('mdi6.help-circle-outline', color=TEXT_TERTIARY))
+            self._btn_get_key.setIconSize(QSize(16, 16))
+            self._btn_get_key.setFixedSize(_ROW_H, _ROW_H)
+            self._btn_get_key.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_get_key.setToolTip(f"获取 {provider['name']} API Key")
+            self._btn_get_key.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self._key_url)))
+            title_row.addWidget(self._btn_get_key)
+        L.addLayout(title_row)
         L.addSpacing(_BLOCK_GAP)
 
         # section: 连接
         L.addWidget(self._section("连接"))
         L.addSpacing(_SEC_GAP)
 
+        # API Key（堆叠式）
+        lbl_key = QLabel("API Key")
+        lbl_key.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        L.addWidget(lbl_key)
+        L.addSpacing(4)
         key_w = QWidget()
         kh = QHBoxLayout(key_w)
         kh.setContentsMargins(0, 0, 0, 0)
@@ -914,49 +1211,93 @@ class SettingsDialog(QDialog):
         kh.addWidget(self._provider_key_input, 1)
         self._btn_verify_key = PushButton("验证")
         self._btn_verify_key.setFixedHeight(_ROW_H)
-        self._btn_verify_key.setFixedWidth(72)
+        self._btn_verify_key.setFixedWidth(64)
         self._btn_verify_key.clicked.connect(self._verify_provider_key)
         kh.addWidget(self._btn_verify_key)
-        L.addLayout(self._form_row("API Key", key_w))
+        L.addWidget(key_w)
+        L.addSpacing(6)
+
+        # 内联验证状态标签
+        self._verify_status_lbl = QLabel()
+        self._verify_status_lbl.setStyleSheet("color:transparent; font-size:11px;")
+        self._verify_status_lbl.setFixedHeight(16)
+        L.addWidget(self._verify_status_lbl)
         L.addSpacing(_ROW_GAP)
 
+        # Base URL（堆叠式）
+        lbl_url = QLabel("Base URL")
+        lbl_url.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        L.addWidget(lbl_url)
+        L.addSpacing(4)
         self._provider_base_url = LineEdit()
         self._provider_base_url.setPlaceholderText("自定义 API 地址（可选）")
         self._provider_base_url.setText(ai_config.get_api_base_url(provider_id))
         self._provider_base_url.setFixedHeight(_ROW_H)
-        L.addLayout(self._form_row("Base URL", self._provider_base_url))
+        L.addWidget(self._provider_base_url)
         L.addSpacing(_BLOCK_GAP)
 
         # section: 模型
         L.addWidget(self._section("模型"))
         L.addSpacing(_SEC_GAP)
 
+        # 视觉分析模型
         all_vision = ai_config.get(f"{provider_id}_vision_models", [])
         if not all_vision:
-            all_vision = [m.get("name", m["id"]) for m in AI_MODELS.get("vision", []) if m.get("provider") == provider_id]
+            if provider.get("is_custom"):
+                all_vision = provider.get("vision_models", [])
+            else:
+                all_vision = [m.get("name", m["id"]) for m in AI_MODELS.get("vision", []) if m.get("provider") == provider_id]
 
-        self._vision_model_combo = ComboBox()
+        # 视觉分析模型（堆叠式）
+        lbl_v = QLabel("视觉分析模型")
+        lbl_v.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        L.addWidget(lbl_v)
+        L.addSpacing(4)
+        # 自定义服务商使用可编辑下拉框，支持手动输入模型名
+        is_custom = provider.get("is_custom", False)
+        if is_custom and EditableComboBox is not None:
+            self._vision_model_combo = EditableComboBox()
+            self._vision_model_combo.setPlaceholderText("输入或选择模型名")
+        else:
+            self._vision_model_combo = ComboBox()
         self._vision_model_combo.setFixedHeight(_ROW_H)
-        for mid in all_vision:
-            dn = mid
-            for m in AI_MODELS.get("vision", []):
-                if m["id"] == mid:
-                    dn = m.get("name", mid)
-                    break
-            self._vision_model_combo.addItem(dn)
-            self._vision_model_combo.setItemData(self._vision_model_combo.count() - 1, mid)
-        saved_v = ai_config.get("vision_model", provider.get("default_vision"))
-        idx = self._vision_model_combo.findData(saved_v)
-        self._vision_model_combo.setCurrentIndex(max(idx, 0))
-        L.addLayout(self._form_row("视觉分析模型", self._vision_model_combo))
+        if all_vision:
+            for mid in all_vision:
+                dn = mid
+                for m in AI_MODELS.get("vision", []):
+                    if m["id"] == mid:
+                        dn = m.get("name", mid)
+                        break
+                self._vision_model_combo.addItem(dn)
+                self._vision_model_combo.setItemData(self._vision_model_combo.count() - 1, mid)
+            saved_v = ai_config.get("vision_model", provider.get("default_vision"))
+            idx = self._vision_model_combo.findData(saved_v)
+            self._vision_model_combo.setCurrentIndex(max(idx, 0))
+        else:
+            if is_custom and EditableComboBox is not None:
+                self._vision_model_combo.addItem("", "")
+                # 保持可用，用户可手动输入
+            else:
+                self._vision_model_combo.addItem("无可用模型", "")
+                self._vision_model_combo.setEnabled(False)
+        L.addWidget(self._vision_model_combo)
         L.addSpacing(_ROW_GAP)
 
+        # 图像生成模型
         all_img = ai_config.get(f"{provider_id}_image_gen_models", [])
         if not all_img:
-            defs = [m for m in AI_MODELS.get("image_gen", []) if m.get("provider") == provider_id]
-            if defs:
-                all_img = [m["id"] for m in defs]
+            if provider.get("is_custom"):
+                all_img = provider.get("image_gen_models", [])
+            else:
+                defs = [m for m in AI_MODELS.get("image_gen", []) if m.get("provider") == provider_id]
+                if defs:
+                    all_img = [m["id"] for m in defs]
 
+        # 图像生成模型（堆叠式）
+        lbl_ig = QLabel("图像生成模型")
+        lbl_ig.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        L.addWidget(lbl_ig)
+        L.addSpacing(4)
         self._image_gen_model_combo = ComboBox()
         self._image_gen_model_combo.setFixedHeight(_ROW_H)
         if all_img:
@@ -974,61 +1315,76 @@ class SettingsDialog(QDialog):
         else:
             self._image_gen_model_combo.addItem("无可用模型", "")
             self._image_gen_model_combo.setEnabled(False)
-        L.addLayout(self._form_row("图像生成模型", self._image_gen_model_combo))
+        L.addWidget(self._image_gen_model_combo)
         L.addSpacing(_BLOCK_GAP)
 
-        # 获取 key 链接
-        self._key_url = provider["key_url"]
-        link = PushButton(f"获取 {provider['name']} API Key →")
-        link.setFixedHeight(_ROW_H)
-        link.setCursor(Qt.CursorShape.PointingHandCursor)
-        link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self._key_url)))
-        L.addLayout(self._form_row("", link))
         L.addStretch()
 
     def _add_provider(self):
         from config import AI_PROVIDERS
         enabled = ai_config.get_enabled_providers()
         available = [p for p in AI_PROVIDERS if p not in enabled]
-        if not available:
-            QMessageBox.information(self, "提示", "所有服务商已添加")
-            return
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLE)
+
+        # 预设服务商
         for pid in available:
             a = menu.addAction(AI_PROVIDERS[pid]["name"])
             a.setData(pid)
+
+        # 自定义选项（始终可选）
+        if available:
+            menu.addSeparator()
+        custom_action = menu.addAction("＋ 自定义服务商…")
+        custom_action.setData("__custom__")
+
         pos = self.btn_add_provider.mapToGlobal(QPoint(0, self.btn_add_provider.height()))
         a = menu.exec(pos)
-        if a:
-            ai_config.add_provider(a.data())
-            self._refresh_provider_combo()
-            self.provider_combo.setCurrentIndex(self.provider_combo.count() - 1)
+        if not a:
+            return
 
-    def _remove_provider(self):
-        idx = self.provider_combo.currentIndex()
-        if idx < 0:
-            return
-        enabled = ai_config.get_enabled_providers()
-        if idx >= len(enabled):
-            return
-        pid = enabled[idx]
-        from config import AI_PROVIDERS
-        name = AI_PROVIDERS.get(pid, {}).get("name", pid)
+        if a.data() == "__custom__":
+            self._show_custom_provider_dialog()
+        else:
+            ai_config.add_provider(a.data())
+            self._refresh_provider_list()
+            for i in range(self._provider_list.count()):
+                item = self._provider_list.item(i)
+                if item and item.data(Qt.ItemDataRole.UserRole) == a.data():
+                    self._provider_list.setCurrentRow(i)
+                    break
+
+    def _delete_provider_by_id(self, provider_id):
+        """通过详情面板的删除按钮删除指定服务商"""
+        info = self._get_provider_info(provider_id)
+        name = info["name"] if info else provider_id
         if QMessageBox.question(
             self, "确认删除", f'确定要删除服务商 "{name}" 吗？',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes:
-            ai_config.remove_provider(pid)
-            self._refresh_provider_combo()
-            if self.provider_combo.count() > 0:
-                self.provider_combo.setCurrentIndex(0)
+            ai_config.remove_provider(provider_id)
+            # 如果是自定义服务商，同时清理记录
+            if ai_config.is_custom_provider(provider_id):
+                ai_config.remove_custom_provider(provider_id)
+            self._refresh_provider_list()
+
+    def _remove_provider(self):
+        """通过左栏删除按钮删除当前选中的服务商"""
+        row = self._provider_list.currentRow()
+        if row < 0:
+            return
+        item = self._provider_list.item(row)
+        if not item:
+            return
+        pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid:
+            self._delete_provider_by_id(pid)
 
     def _set_default_provider(self, provider_id):
         from config import AI_PROVIDERS
         ai_config.set_current_provider_selected(provider_id)
+        self._refresh_provider_list()
         self._show_provider_detail(provider_id)
-        QMessageBox.information(self, "成功", f"已将 {AI_PROVIDERS[provider_id]['name']} 设为默认服务商")
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -1248,35 +1604,49 @@ class SettingsDialog(QDialog):
         provider_id = self._current_provider_detail
         api_key = self._provider_key_input.text().strip()
         if not api_key:
-            QMessageBox.warning(self, "验证失败", "请输入 API Key")
+            self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
+            self._verify_status_lbl.setText("⚠ 请输入 API Key")
             return
         self._btn_verify_key.setEnabled(False)
         self._btn_verify_key.setText("验证中…")
+        self._verify_status_lbl.setStyleSheet(f"color:{TEXT_TERTIARY}; font-size:11px;")
+        self._verify_status_lbl.setText("正在验证…")
+        # 触发异步拉取 OpenRouter 模型缓存（不阻塞验证流程）
+        model_classifier.ensure_cache_ready()
         try:
-            verify_map = {
-                "google": self._verify_google_key,
-                "openai": self._verify_openai_key,
-                "anthropic": self._verify_anthropic_key,
-                "seedream": self._verify_seedream_key,
-            }
-            fn = verify_map.get(provider_id)
-            if fn:
-                success, message, models = fn(api_key)
+            # 自定义服务商走通用 OpenAI 兼容验证
+            if ai_config.is_custom_provider(provider_id):
+                base_url = ai_config.get_api_base_url(provider_id)
+                success, message, models = self._verify_custom_key(api_key, base_url)
             else:
-                success, message, models = False, f"未知服务商: {provider_id}", []
+                verify_map = {
+                    "google": self._verify_google_key,
+                    "openai": self._verify_openai_key,
+                    "anthropic": self._verify_anthropic_key,
+                    "seedream": self._verify_seedream_key,
+                }
+                fn = verify_map.get(provider_id)
+                if fn:
+                    success, message, models = fn(api_key)
+                else:
+                    success, message, models = False, f"未知服务商: {provider_id}", {}
 
             if success:
-                QMessageBox.information(self, "验证成功", f"API Key 验证通过！\n{message}")
+                self._verify_status_lbl.setStyleSheet(f"color:#52c41a; font-size:11px;")
+                self._verify_status_lbl.setText(f"✓ {message}")
                 ai_config.set_api_key(provider_id, api_key)
                 if hasattr(self, '_provider_base_url'):
                     ai_config.set_api_base_url(provider_id, self._provider_base_url.text().strip())
                 ai_config.set(f"{provider_id}_vision_models", models.get("vision", []))
                 ai_config.set(f"{provider_id}_image_gen_models", models.get("image_gen", []))
+                self._refresh_provider_list()
                 self._show_provider_detail(provider_id)
             else:
-                QMessageBox.warning(self, "验证失败", f"API Key 无效：\n{message}")
+                self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
+                self._verify_status_lbl.setText(f"✗ {message}")
         except Exception as e:
-            QMessageBox.critical(self, "验证错误", f"验证过程出错：\n{str(e)}")
+            self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
+            self._verify_status_lbl.setText(f"✗ 验证出错: {str(e)}")
         finally:
             self._btn_verify_key.setEnabled(True)
             self._btn_verify_key.setText("验证")
@@ -1289,7 +1659,8 @@ class SettingsDialog(QDialog):
             for model in client.models.list():
                 fn = model.name if hasattr(model, 'name') else str(model)
                 all_models.append(fn[7:] if fn.startswith("models/") else fn)
-            return True, f"有效 Key，共发现 {len(all_models)} 个模型", {"vision": all_models, "image_gen": all_models}
+            classified = model_classifier.classify_batch(all_models)
+            return True, f"有效 Key，共发现 {len(all_models)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
         except Exception as e:
             import requests
             try:
@@ -1297,7 +1668,8 @@ class SettingsDialog(QDialog):
                 if resp.status_code == 200:
                     models = resp.json().get("models", [])
                     all_m = [m.get("name", "").removeprefix("models/") for m in models]
-                    return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+                    classified = model_classifier.classify_batch(all_m)
+                    return True, f"有效 Key，共发现 {len(all_m)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
                 if resp.status_code == 401:
                     return False, "无效的 API Key", {}
                 return False, f"API 返回错误: {resp.status_code}", {}
@@ -1310,7 +1682,8 @@ class SettingsDialog(QDialog):
             resp = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
             if resp.status_code == 200:
                 all_m = [m.get("id") for m in resp.json().get("data", [])]
-                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+                classified = model_classifier.classify_batch(all_m)
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
             if resp.status_code == 401:
                 return False, "无效的 API Key", {}
             return False, f"API 返回错误: {resp.status_code}", {}
@@ -1323,7 +1696,8 @@ class SettingsDialog(QDialog):
             resp = requests.get("https://api.anthropic.com/v1/models", headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout=10)
             if resp.status_code == 200:
                 all_m = [m.get("id") for m in resp.json().get("data", [])]
-                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+                classified = model_classifier.classify_batch(all_m)
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
             if resp.status_code == 401:
                 return False, "无效的 API Key", {}
             return False, f"API 返回错误: {resp.status_code}", {}
@@ -1336,12 +1710,190 @@ class SettingsDialog(QDialog):
             resp = requests.get("https://api.seedream.io/v1/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=10)
             if resp.status_code == 200:
                 all_m = [m.get("id") for m in resp.json().get("data", [])]
-                return True, f"有效 Key，共发现 {len(all_m)} 个模型", {"vision": all_m, "image_gen": all_m}
+                classified = model_classifier.classify_batch(all_m)
+                return True, f"有效 Key，共发现 {len(all_m)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
             if resp.status_code == 401:
                 return False, "无效的 API Key", {}
             return False, f"API 返回错误: {resp.status_code}", {}
         except Exception as e:
             return False, str(e), {}
+
+    def _verify_custom_key(self, api_key, base_url):
+        """验证自定义服务商（OpenAI 兼容协议）
+        尝试多种常见端点路径，适配不同代理（如 Venus /llmproxy/ 路径）。
+        """
+        import requests
+
+        if not base_url:
+            base_url = "https://api.openai.com"
+        base_url = base_url.rstrip("/")
+
+        # 按优先级尝试的模型列表端点
+        model_endpoints = [
+            f"{base_url}/v1/models",
+            f"{base_url}/llmproxy/models",
+            f"{base_url}/models",
+        ]
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        # 1) 先尝试 GET models 端点
+        for url in model_endpoints:
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    all_m = [m.get("id") for m in data.get("data", [])] if isinstance(data, dict) else []
+                    if not all_m and isinstance(data, dict):
+                        all_m = [m.get("name", "").removeprefix("models/") for m in data.get("models", [])]
+                    if not all_m:
+                        all_m = [m.get("id", "") for m in data] if isinstance(data, list) else []
+                    all_m = [m for m in all_m if m]
+                    classified = model_classifier.classify_batch(all_m)
+                    return True, f"有效 Key，共发现 {len(all_m)} 个模型（视觉 {len(classified['vision'])} / 图像生成 {len(classified['image_gen'])}）", classified
+                # 401/403 = Key 问题，直接返回（不继续尝试其他端点）
+                if resp.status_code in (401, 403):
+                    return False, f"无效的 API Key（HTTP {resp.status_code}）", {}
+                # 400/404/其他 = 此端点不可用，尝试下一个
+            except Exception:
+                continue
+
+        # 2) models 端点全部不可用，尝试发一个最简 chat 请求验证 Key 有效性
+        chat_endpoints = [
+            f"{base_url}/v1/chat/completions",
+            f"{base_url}/llmproxy/chat/completions",
+            f"{base_url}/chat/completions",
+        ]
+        test_payload = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        }
+        for url in chat_endpoints:
+            try:
+                resp = requests.post(url, headers={**headers, "Content-Type": "application/json"},
+                                     json=test_payload, timeout=15)
+                if resp.status_code in (200, 400):
+                    # 200 = Key 有效且请求成功；400 = Key 有效但模型名等参数不对
+                    return True, "Key 验证通过（无法自动获取模型列表，请手动填写）", {"vision": [], "image_gen": []}
+                if resp.status_code in (401, 403):
+                    # 401/403 = Key 无效或账户问题
+                    try:
+                        err_msg = resp.json().get("msg", "")
+                    except Exception:
+                        err_msg = ""
+                    return False, f"无效的 API Key（{err_msg}）" if err_msg else f"无效的 API Key（HTTP {resp.status_code}）", {}
+                # 404 = 此端点不存在，尝试下一个
+            except Exception:
+                continue
+
+        return False, "无法连接到服务，请检查 Base URL 是否正确", {}
+
+    def _show_custom_provider_dialog(self):
+        """添加自定义服务商对话框"""
+        # LineEdit / PushButton 已在模块顶部集中安全导入
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("添加自定义服务商")
+        dlg.setFixedWidth(420)
+        dlg.setStyleSheet(f"QDialog {{ background:{BG_HOVER}; }}")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(24, 24, 24, 24)
+        lay.setSpacing(12)
+
+        # 名称
+        lbl_name = QLabel("服务商名称")
+        lbl_name.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_name)
+        name_edit = LineEdit()
+        name_edit.setPlaceholderText("如：DeepSeek、Ollama、我的中转站")
+        name_edit.setFixedHeight(_ROW_H)
+        lay.addWidget(name_edit)
+        lay.addSpacing(4)
+
+        # Base URL
+        lbl_url = QLabel("Base URL")
+        lbl_url.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_url)
+        url_edit = LineEdit()
+        url_edit.setPlaceholderText("如：https://api.deepseek.com（可选，默认 OpenAI）")
+        url_edit.setFixedHeight(_ROW_H)
+        lay.addWidget(url_edit)
+        lay.addSpacing(4)
+
+        # API Key（可选，可稍后在详情页填写）
+        lbl_key = QLabel("API Key（可选，可稍后填写）")
+        lbl_key.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_key)
+        key_edit = LineEdit()
+        key_edit.setPlaceholderText("粘贴 API Key")
+        key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        key_edit.setFixedHeight(_ROW_H)
+        lay.addWidget(key_edit)
+        lay.addSpacing(4)
+
+        # 模型列表（可选）
+        lbl_models = QLabel("模型列表（可选，逗号分隔，可验证后自动获取）")
+        lbl_models.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_models)
+        models_edit = LineEdit()
+        models_edit.setPlaceholderText("如：deepseek-chat, deepseek-coder")
+        models_edit.setFixedHeight(_ROW_H)
+        lay.addWidget(models_edit)
+        lay.addSpacing(16)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = PushButton("取消")
+        cancel_btn.setFixedHeight(_ROW_H)
+        cancel_btn.setFixedWidth(80)
+        cancel_btn.clicked.connect(dlg.reject)
+        btn_row.addWidget(cancel_btn)
+        ok_btn = PushButton("添加")
+        ok_btn.setFixedHeight(_ROW_H)
+        ok_btn.setFixedWidth(80)
+        ok_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(ok_btn)
+        lay.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name = name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "请输入服务商名称")
+            return
+
+        # 生成唯一 ID
+        import uuid
+        provider_id = f"custom_{uuid.uuid4().hex[:8]}"
+        base_url = url_edit.text().strip()
+        api_key = key_edit.text().strip()
+        models_text = models_edit.text().strip()
+        vision_models = [m.strip() for m in models_text.split(",") if m.strip()] if models_text else []
+
+        # 添加到配置
+        ai_config.add_custom_provider(
+            provider_id=provider_id,
+            name=name,
+            base_url=base_url,
+            key_url="",
+            vision_models=vision_models,
+            image_gen_models=[],
+        )
+        if api_key:
+            ai_config.set_api_key(provider_id, api_key)
+        if base_url:
+            ai_config.set_api_base_url(provider_id, base_url)
+
+        self._refresh_provider_list()
+        # 选中新添加的项
+        for i in range(self._provider_list.count()):
+            item = self._provider_list.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == provider_id:
+                self._provider_list.setCurrentRow(i)
+                break
 
     # ══════════════════════════════════════════════════════
     #  保存 / 重置
@@ -1363,12 +1915,19 @@ class SettingsDialog(QDialog):
                 ai_config.set_api_base_url(pid, self._provider_base_url.text().strip())
             if hasattr(self, '_vision_model_combo'):
                 v = self._vision_model_combo.currentData()
+                # 可编辑下拉框：data 为空时取用户输入的文本
+                if not v:
+                    v = self._vision_model_combo.currentText().strip()
                 if v:
                     ai_config.set("vision_model", v)
             if hasattr(self, '_image_gen_model_combo'):
                 v = self._image_gen_model_combo.currentData()
+                if not v:
+                    v = self._image_gen_model_combo.currentText().strip()
                 if v:
                     ai_config.set("image_gen_model", v)
+                    # 同时记录图像生成模型所属的 provider
+                    ai_config.set("image_gen_provider", pid)
 
         # 快捷键
         seq = self.screenshot_hotkey.keySequence()
@@ -1710,25 +2269,56 @@ class SettingsDialog(QDialog):
                 border: none;
             }}
 
+            /* ── icon action buttons (add/delete/set-default) ── */
+            QToolButton#icon_btn {{
+                background: {_CONTENT_BG};
+                border: 1px solid {BORDER_DEFAULT};
+                border-radius: {RADIUS_SM}px;
+                padding: 0px;
+            }}
+            QToolButton#icon_btn:hover {{
+                background: {BG_HOVER};
+                border-color: {ACCENT_PRIMARY};
+            }}
+            QToolButton#icon_btn:pressed {{
+                background: {ACCENT_SUBTLE};
+            }}
+            QToolButton#icon_btn:disabled {{
+                background: transparent;
+                border: 1px solid {BORDER_DEFAULT};
+            }}
+
+            /* ── 当前默认服务商的星星按钮（不禁用，仅视觉锁定）── */
+            QToolButton#icon_btn[locked="true"] {{
+                background: {_CONTENT_BG};
+                border: 1px solid {BORDER_DEFAULT};
+                border-radius: {RADIUS_SM}px;
+                padding: 0px;
+            }}
+
             /* ── prompt list (left panel) ── */
-            QListWidget#pm_list {{
+            QListWidget#pm_list,
+            QListWidget#ai_provider_list {{
                 background: transparent;
                 border: none;
                 outline: none;
                 font-size: 13px;
                 color: {TEXT_PRIMARY};
             }}
-            QListWidget#pm_list::item {{
+            QListWidget#pm_list::item,
+            QListWidget#ai_provider_list::item {{
                 padding: 9px 10px;
                 border-radius: {RADIUS_SM}px;
                 margin: 1px 0;
             }}
-            QListWidget#pm_list::item:selected {{
+            QListWidget#pm_list::item:selected,
+            QListWidget#ai_provider_list::item:selected {{
                 background: {ACCENT_SUBTLE};
                 color: {ACCENT_PRIMARY};
                 font-weight: 600;
             }}
-            QListWidget#pm_list::item:hover:!selected {{
+            QListWidget#pm_list::item:hover:!selected,
+            QListWidget#ai_provider_list::item:hover:!selected {{
                 background: {BG_HOVER};
             }}
 

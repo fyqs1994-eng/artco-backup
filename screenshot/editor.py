@@ -471,9 +471,9 @@ class EditorWindow(QMainWindow):
         self.prompt_menu.exec(pos)
     
     def _open_prompt_editor(self):
-        self.prompt_settings_window = SettingsDialog(self)
+        self.prompt_settings_window = SettingsDialog(None)
         self.prompt_settings_window.show_tab('prompt')
-        self.prompt_settings_window.show()
+        self.prompt_settings_window._ensure_on_screen()
     
     def _do_ai_analyze(self, prompt: str = None, prompt_type: str = "text"):
         """执行 AI 分析 - 通过胶囊显示结果"""

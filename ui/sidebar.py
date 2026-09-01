@@ -786,8 +786,9 @@ class WeComPanel(QWidget):
         elif action_id == 'settings':
             # 打开设置对话框的企微配置
             from ui.settings import SettingsDialog
-            dialog = SettingsDialog(self)
+            dialog = SettingsDialog(None)
             dialog.show_tab('wecom')
+            dialog._ensure_on_screen()
             dialog.exec()
             self._load_webhooks()
     
@@ -1709,9 +1710,21 @@ class CombinedSidebar(QWidget):
             btn.set_badge_count(count)
 
     def _on_panel_changed(self, panel_id: str):
+        try:
+            import datetime
+            with open(r'F:\Idea\Artco\_settings_trace.log', 'a',
+                      encoding='utf-8') as f:
+                f.write('[%s] sidebar._on_panel_changed(%r)\n' % (
+                    datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3], panel_id))
+        except Exception:
+            pass
         if panel_id == 'settings':
             # 打开设置对话框
-            dialog = SettingsDialog(self)
+            # 注意：不能传 self 作 parent —— sidebar 属于
+            # Tool|Frameless|StaysOnTop 浮窗体系，模态对话框以其为
+            # parent 时在 Windows 上会因窗口层级冲突而无法显示。
+            dialog = SettingsDialog(None)
+            dialog._ensure_on_screen()
             dialog.exec()
             
             # 对话框关闭后，重置活动面板为之前的面板（如果有的话）

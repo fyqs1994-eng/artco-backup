@@ -7,6 +7,66 @@ import sys
 import os
 import base64
 import threading
+import ctypes
+
+# ── 启动加固：保证 stdout/stderr 永远可写 ──
+# 关键：必须在本文件任何 import（尤其 ui.settings → qfluentwidgets）之前执行。
+# qfluentwidgets 在模块级执行 print(ALERT)；而下方 FreeConsole() 会释放控制台，
+# 使 stdout 句柄失效，print 抛 OSError(WinError 6)，导致设置面板无法构造。
+# 这里先把 stdout/stderr 换成"永远不抛异常"的安全流。
+_ARTCO_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'artco_error.log')
+
+
+class _SafeStream:
+    """写入失败静默降级到日志文件的流，绝不向外抛异常"""
+
+    def __init__(self, name):
+        self._name = name
+
+    def write(self, s):
+        try:
+            if isinstance(s, bytes):
+                s = s.decode('utf-8', 'replace')
+            with open(_ARTCO_LOG, 'a', encoding='utf-8') as f:
+                f.write(s)
+        except Exception:
+            pass
+        return len(s) if s else 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        raise OSError('no console')
+
+    def __getattr__(self, item):
+        def _noop(*a, **k):
+            return None
+        return _noop
+
+
+def _stream_broken(stream):
+    """探测流是否可写（无控制台句柄时会抛 OSError）"""
+    try:
+        stream.write('')
+        stream.flush()
+        return False
+    except Exception:
+        return True
+
+
+# 无论当前有无控制台，统一替换为安全流，杜绝后续任何 print 崩溃
+sys.stdout = _SafeStream('stdout')
+sys.stderr = _SafeStream('stderr')
+
+# GUI 程序启动后立即脱离控制台，避免弹出终端窗口 &
+# 防止用户关闭终端时进程被一并终止
+_hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+if _hwnd != 0:
+    ctypes.windll.kernel32.FreeConsole()
 
 # 设置 Qt API 为 PySide6（必须在导入 qtawesome 之前）
 os.environ['QT_API'] = 'pyside6'
@@ -19,10 +79,10 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import (
     Qt, QSize, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QPoint, QSharedMemory,
-    QBuffer, QIODevice
+    QBuffer, QIODevice, QRectF
 )
 
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap, QPainter, QPen, QPainterPath, QConicalGradient, QBrush
 
 
 from version import APP_VERSION, APP_NAME
@@ -34,7 +94,7 @@ from utils import hotkey_manager, convert_hotkey_format
 import updater
 from ui import (
     AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, WorkbenchWindow,
-    ClipboardHistoryManager, ClipboardFloatPanel
+    ClipboardHistoryManager, ClipboardFloatPanel, GenCanvas
 )
 from screenshot import ScreenshotOverlay, ScreenSelector, PinWindow
 
@@ -44,6 +104,85 @@ def get_app_icon():
     if os.path.exists(icon_path):
         return QIcon(icon_path)
     return qta.icon('mdi6.crop', color='#ffffff')
+
+
+class GlowContainer(QWidget):
+    """带虹光流转效果的容器控件，在自身背景绘制之后叠加虹光，避免被子控件遮挡"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._is_processing = False
+        self._breathing_value = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+
+    def set_processing(self, active: bool):
+        self._is_processing = active
+        self.update()
+
+    def set_breathing_value(self, value: float):
+        self._breathing_value = value
+        if self._is_processing:
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._is_processing:
+            return
+        import colorsys
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cw = self.width()
+        ch = self.height()
+        radius = appearance_config.get_border_radius()
+        center_x = cw / 2
+        center_y = ch / 2
+        angle = self._breathing_value * 360
+
+        # 极光色域：cyan(0.52) → blue(0.62) → purple(0.78)，窄带流转更高级
+        HUE_START = 0.52
+        HUE_END = 0.78
+        HUE_SPAN = HUE_END - HUE_START
+        N_STOPS = 12  # 更多色标 → 插值更平滑
+
+        def make_gradient(sat, val, alpha, offset=0):
+            g = QConicalGradient(center_x, center_y, -angle)
+            for i in range(N_STOPS + 1):
+                t = i / N_STOPS
+                # 首尾闭合：cyan→blue→purple→blue→cyan，消除接缝跳跃
+                if t <= 0.5:
+                    hue = HUE_START + t * 2 * HUE_SPAN
+                else:
+                    hue = HUE_END - (t - 0.5) * 2 * HUE_SPAN
+                r, g_, b = colorsys.hsv_to_rgb(hue, sat, val)
+                g.setColorAt(t, QColor(int(r * 255), int(g_ * 255), int(b * 255), alpha))
+            return g
+
+        # 主光环：紧贴内轮廓，低饱和保持通透
+        main_path = QPainterPath()
+        main_path.addRoundedRect(QRectF(1, 1, cw - 2, ch - 2), radius - 1, radius - 1)
+        pen = QPen()
+        pen.setWidthF(3.0)
+        pen.setBrush(QBrush(make_gradient(0.35, 1.0, 200)))
+        painter.setPen(pen)
+        painter.drawPath(main_path)
+
+        # 向内柔和扩散：多层递减透明度，逐层缩小
+        diffusion_layers = [
+            (3.0, 0.32, 1.0, 120),
+            (5.0, 0.30, 1.0, 78),
+            (7.0, 0.27, 1.0, 48),
+            (9.5, 0.24, 0.98, 28),
+            (12.0, 0.20, 0.95, 15),
+        ]
+        for inset, sat, val, alpha in diffusion_layers:
+            r_val = max(radius - inset / 2, 2)
+            p = QPainterPath()
+            p.addRoundedRect(QRectF(inset, inset, cw - inset * 2, ch - inset * 2), r_val, r_val)
+            pen = QPen()
+            pen.setWidthF(2.0)
+            pen.setBrush(QBrush(make_gradient(sat, val, alpha)))
+            painter.setPen(pen)
+            painter.drawPath(p)
 
 
 class CapsuleWidget(QWidget):
@@ -84,11 +223,6 @@ class CapsuleWidget(QWidget):
         self._conversation_history = []  # OpenAI messages 格式
         self._conversation_image = None  # 首次截图的 base64 数据（追问时不重传）
         self._original_task_type = "vision"  # 记录原始任务类型（vision / image_gen）
-        
-        # 三点加载动画状态
-        self._loading_dot_index = 0
-        self._loading_timer = QTimer(self)
-        self._loading_timer.timeout.connect(self._update_loading_dots)
         
         self.hotkey_triggered.connect(self.start_screenshot)
         self.clipboard_float_requested.connect(self._show_clipboard_float)
@@ -136,59 +270,13 @@ class CapsuleWidget(QWidget):
     
     breathing_value = Property(float, get_breathing_value, set_breathing_value)
     
-    def _update_loading_dots(self):
-        """更新弹跳球加载动画 - 三个球依次上下弹跳"""
-        # 用不同大小的点模拟弹跳高度：●在下(落地)，·在上(弹起)
-        bounce_frames = [
-            '●  ·  ·',  # 球1落地，球2、3弹起
-            '·  ●  ·',  # 球2落地
-            '·  ·  ●',  # 球3落地
-            '·  ·  ●',  # 停顿
-            '·  ●  ·',  # 返回
-            '●  ·  ·',  # 返回
-        ]
-        self.btn_screenshot.setText(bounce_frames[self._loading_dot_index])
-        self.btn_screenshot.setIcon(QIcon())  # 清除图标，只显示文字
-        self._loading_dot_index = (self._loading_dot_index + 1) % 6
-    
     def _update_breathing_style(self):
         if not self._is_processing:
             return
-        
-        # 彩虹色循环：使用 HSV 色相旋转，降低饱和度营造柔和感
-        import colorsys
-        hue = self._breathing_value  # 0.0 ~ 1.0 对应色相 0° ~ 360°
-        r, g, b = colorsys.hsv_to_rgb(hue, 0.35, 0.92)
-        r, g, b = int(r * 255), int(g * 255), int(b * 255)
-        
-        # 计算渐变终点颜色（色相偏移）
-        hue2 = (hue + 0.08) % 1.0
-        r2, g2, b2 = colorsys.hsv_to_rgb(hue2, 0.35, 0.92)
-        r2, g2, b2 = int(r2 * 255), int(g2 * 255), int(b2 * 255)
-        
-        bg_css = self._build_bg_css()
-        # 转换为大括号格式（f-string 兼容）
-        bg_css_f = bg_css.replace("{", "{{").replace("}", "}}")
-        
-        self.container.setStyleSheet(f"""
-            {bg_css_f}
-            QPushButton#btn_screenshot {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba({r}, {g}, {b}, 0.9),
-                    stop:1 rgba({r2}, {g2}, {b2}, 0.9));
-                border: 1px solid rgba(255, 255, 255, 0.35);
-                border-radius: 8px;
-                color: rgba(255, 255, 255, 0.95);
-            }}
+        self.container.set_breathing_value(self._breathing_value)
 
-            QPushButton#btn_archive {{
-                background-color: transparent;
-                border: none;
-                border-radius: 8px;
-            }}
-            QPushButton#btn_archive:hover {{ background-color: rgba(0, 0, 0, 0.08); }}
-            QPushButton#btn_archive:pressed {{ background-color: rgba(0, 0, 0, 0.12); }}
-        """)
+    def paintEvent(self, event):
+        super().paintEvent(event)
 
     
     def reveal(self, animated: bool = True):
@@ -245,13 +333,8 @@ class CapsuleWidget(QWidget):
         }
         self._conversation_history.append(first_message)
         
-        # 启动弹跳点加载动画
-        self._loading_dot_index = 0
-        self._update_loading_dots()
-        self._loading_timer.start(200)  # 每200ms切换，弹跳更生动
-        
-        self.btn_screenshot.setIconSize(QSize(18, 18))
-        self.btn_screenshot.setEnabled(False)
+        # 截图按钮保持原样不动，仅虹光环绕胶囊流转
+        self.container.set_processing(True)
         
         self.breathing_animation.start()
         
@@ -318,7 +401,7 @@ class CapsuleWidget(QWidget):
                     "role": "assistant",
                     "content": "好的，我已收到这张图片。请问你有什么问题？"
                 }
-            ]
+]
         
         self._show_image_bubble(image_path)
     
@@ -326,11 +409,12 @@ class CapsuleWidget(QWidget):
         """在气泡中显示图像生成结果"""
         if self.ai_bubble:
             self.ai_bubble.close()
-        
+
         self.ai_bubble = AIResultBubble()
         self.ai_bubble.closed.connect(self._on_bubble_closed)
         self.ai_bubble.pin_image_requested.connect(self._pin_generated_image)
         self.ai_bubble.followup_requested.connect(self._on_followup_requested)
+        self.ai_bubble.open_canvas_requested.connect(self._on_open_canvas_from_bubble)
         
         capsule_pos = self.pos()
         bubble_x = capsule_pos.x()
@@ -341,16 +425,59 @@ class CapsuleWidget(QWidget):
             bubble_y = capsule_pos.y() - self.ai_bubble.height() - 10
         if bubble_x + self.ai_bubble.width() > screen.width():
             bubble_x = screen.width() - self.ai_bubble.width() - 10
-        
+
         self.ai_bubble.move(bubble_x, bubble_y)
         self.ai_bubble.show_image(image_path)
+
+        # 预热 AI 工作台：在气泡显示后异步创建 GenCanvas，
+        # 避免用户点击"工作台"按钮时同步构造造成鼠标卡顿
+        QTimer.singleShot(200, self._ensure_gen_canvas)
     
+    def _ensure_gen_canvas(self):
+        """懒加载 AI 工作台"""
+        if not hasattr(self, '_gen_canvas') or self._gen_canvas is None:
+            self._gen_canvas = GenCanvas()
+            self._gen_canvas.canvas_pin_requested.connect(self._pin_generated_image)
+            self._gen_canvas.canvas_edit_requested.connect(self._edit_canvas_pixmap)
+        return self._gen_canvas
+
+    def _open_gen_canvas(self):
+        """打开并聚焦 AI 工作台"""
+        canvas = self._ensure_gen_canvas()
+        canvas.show()
+        canvas.raise_()
+        canvas.activateWindow()
+        return canvas
+
+    def _on_open_canvas_from_bubble(self, pixmap, prompt=""):
+        """气泡点击工作台按钮：把当前图送入工作台"""
+        self._send_to_gen_canvas(pixmap, prompt)
+
+    def _send_to_gen_canvas(self, pixmap, prompt="原始生成"):
+        """把一张图送入工作台作为初始版本"""
+        canvas = self._open_gen_canvas()
+        # 延迟到窗口渲染后再添加版本，避免 show() 前同步创建 VersionCard + EditorCanvas
+        QTimer.singleShot(0, lambda: canvas.add_initial_version(pixmap, prompt))
+        return canvas
+
+    def _edit_canvas_pixmap(self, pixmap):
+        from screenshot.editor import EditorWindow
+        app = QApplication.instance()
+        editor = EditorWindow(pixmap)
+        editor.show()
+        if not hasattr(app, '_editor_windows'):
+            app._editor_windows = []
+        app._editor_windows.append(editor)
+        editor.destroyed.connect(
+            lambda: app._editor_windows.remove(editor)
+            if editor in app._editor_windows else None)
+
     def _pin_generated_image(self, pixmap):
         """将生成的图片贴到屏幕"""
         from screenshot.editor import EditorWindow
-        
+
         pin_window = PinWindow(pixmap)
-        
+
         # 居中显示
         screen = QGuiApplication.primaryScreen().geometry()
         pin_window.move(
@@ -391,11 +518,8 @@ class CapsuleWidget(QWidget):
     def _stop_processing(self):
         self._is_processing = False
         self.breathing_animation.stop()
-        self._loading_timer.stop()  # 停止三点动画
-        self.btn_screenshot.setIcon(qta.icon('mdi6.crop', color='#666666'))
-        self.btn_screenshot.setIconSize(QSize(18, 18))
-        self.btn_screenshot.setText("")  # 紧凑模式仅图标
         self.btn_screenshot.setEnabled(True)
+        self.container.set_processing(False)  # 停止虹光
         
         # 断开所有 clicked 连接，重新绑定截图功能
         try:
@@ -405,26 +529,10 @@ class CapsuleWidget(QWidget):
         self.btn_screenshot.clicked.connect(self.start_screenshot)
         self.btn_screenshot.setToolTip("截图 (快捷键)")
         
-        self.container.setStyleSheet(self._build_bg_css() + """
-            QPushButton#btn_screenshot {
-                background-color: transparent;
-                border: none;
-                border-radius: 16px;
-                color: #555555;
-            }
-QPushButton#btn_screenshot:hover { background-color: rgba(0, 0, 0, 0.08); }
-QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
-            QPushButton#btn_archive {
-                background-color: transparent;
-                border: none;
-                border-radius: 16px;
-            }
-            QPushButton#btn_archive:hover { background-color: rgba(0, 0, 0, 0.08); }
-            QPushButton#btn_archive:pressed { background-color: rgba(0, 0, 0, 0.12); }
-        """)
+        self.container.setStyleSheet(self._normal_style)
     
     def _enable_abort_button(self):
-        """AI 工作中，将截图按钮变为终止按钮"""
+        """AI 工作中，截图按钮变为终止按钮"""
         if not self._is_processing:
             return
         self.btn_screenshot.setEnabled(True)
@@ -907,7 +1015,7 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAcceptDrops(True)  # 接受外部拖入文件/图片
 
-        self.container = QWidget(self)
+        self.container = GlowContainer(self)
         self.container.setObjectName("container")
         self.container.setAcceptDrops(True)  # container 也接受拖放，防止事件被子控件吞掉
         self.container.setFixedSize(116, 40)  # 圆角矩形浮窗，减小宽度
@@ -1107,22 +1215,80 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         self.archive_window.show()
 
     def _open_settings(self):
-        # 如果已有设置窗口，激活它
-        if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
+        import traceback
+
+        def _slog(msg):
+            """无条件落盘的诊断日志（排查设置面板打不开）"""
             try:
-                if self._settings_dialog.isVisible():
-                    self._settings_dialog.raise_()
-                    self._settings_dialog.activateWindow()
-                    return
+                import datetime
+                with open(r'F:\Idea\Artco\_settings_trace.log', 'a',
+                          encoding='utf-8') as f:
+                    f.write('[%s] %s\n' % (
+                        datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3], msg))
+            except Exception:
+                pass
+
+        _slog('=== _open_settings ENTER ===')
+        try:
+            _slog('CALLER STACK:\n' + ''.join(traceback.format_stack()[-6:-1]))
+        except Exception:
+            pass
+
+        def _native_state(d):
+            """用原生 Win32 复核窗口是否真的显示在屏幕上"""
+            try:
+                import ctypes
+                hwnd = int(d.winId())
+                u = ctypes.windll.user32
+                return ('hwnd=0x%X nativeVisible=%s iconic=%s enabled=%s '
+                        'foreground_is_self=%s' % (
+                            hwnd, bool(u.IsWindowVisible(hwnd)),
+                            bool(u.IsIconic(hwnd)), bool(u.IsWindowEnabled(hwnd)),
+                            u.GetForegroundWindow() == hwnd))
+            except Exception as e:
+                return 'native probe failed: %r' % (e,)
+
+        # 缓存复用模式：对话框只创建一次，关闭时仅隐藏不销毁
+        if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
+            _slog('branch=REUSE existing dialog')
+            try:
+                # 顺序要求：先 show，再由 _ensure_on_screen 做原生兜底，
+                # 否则 IsWindowVisible 检查跑在显示动作之前等于无效。
+                self._settings_dialog.show()
+                self._settings_dialog.raise_()
+                self._settings_dialog.activateWindow()
+                self._settings_dialog._ensure_on_screen()
+                _slog('REUSE done: isVisible=%s geo=%s' % (
+                    self._settings_dialog.isVisible(),
+                    self._settings_dialog.geometry().getRect()))
+                _slog('REUSE native: ' + _native_state(self._settings_dialog))
+                return
             except RuntimeError:
+                # C++ 对象已被回收（理论上不会发生，但做兜底）
+                _slog('REUSE RuntimeError -> reset ref')
                 self._settings_dialog = None
-        
-        self._settings_dialog = SettingsDialog(self)
-        self._settings_dialog.hotkey_changed.connect(self._on_hotkey_changed)
-        self._settings_dialog._appearance_preview_callback = self._refresh_appearance
-        self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self._settings_dialog.destroyed.connect(lambda: setattr(self, '_settings_dialog', None))
-        self._settings_dialog.show()
+            except Exception:
+                _slog('REUSE EXCEPTION:\n' + traceback.format_exc())
+                self._settings_dialog = None
+
+        try:
+            _slog('branch=CREATE new dialog')
+            # 不传 parent：浮窗带 WindowStaysOnTopHint，若作为 parent，
+            # 对话框会继承置顶层级并被限制在浮窗坐标系内，导致显示到屏幕外
+            dlg = SettingsDialog(None)
+            _slog('SettingsDialog constructed OK')
+            self._settings_dialog = dlg
+            dlg.hotkey_changed.connect(self._on_hotkey_changed)
+            dlg._appearance_preview_callback = self._refresh_appearance
+            # 不使用 WA_DeleteOnClose，改为关闭时隐藏（hide），避免销毁竞态
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            dlg.show()
+            dlg._ensure_on_screen()
+            _slog('CREATE done: isVisible=%s geo=%s' % (
+                dlg.isVisible(), dlg.geometry().getRect()))
+        except Exception:
+            _slog('CREATE EXCEPTION:\n' + traceback.format_exc())
+            traceback.print_exc()
     
     def _refresh_appearance(self):
         """从 appearance_config 刷新浮窗样式"""
@@ -1152,23 +1318,48 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             self.container.setStyleSheet(self._normal_style)
     
     def _open_prompt_settings(self):
-        # 统一入口：在设置面板内管理 Prompt
-        if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
+        import traceback as _tb
+
+        def _slog(msg):
             try:
-                if self._settings_dialog.isVisible():
-                    self._settings_dialog.show_tab('prompt')
-                    self._settings_dialog.raise_()
-                    self._settings_dialog.activateWindow()
-                    return
+                import datetime
+                with open(r'F:\Idea\Artco\_settings_trace.log', 'a',
+                          encoding='utf-8') as f:
+                    f.write('[%s] %s\n' % (
+                        datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3], msg))
+            except Exception:
+                pass
+
+        _slog('=== _open_prompt_settings ENTER ===')
+        _slog('CALLER STACK:\n' + ''.join(_tb.format_stack()[-6:-1]))
+        # 统一入口：在设置面板内管理 Prompt（复用同一个对话框实例）
+        if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
+            _slog('prompt branch=REUSE')
+            try:
+                self._settings_dialog.show_tab('prompt')
+                self._settings_dialog.show()
+                self._settings_dialog.raise_()
+                self._settings_dialog.activateWindow()
+                # 顺序要求：兜底显示必须在 show() 之后执行，否则原生
+                # IsWindowVisible 检查跑在 Qt 显示动作之前，等于无效。
+                self._settings_dialog._ensure_on_screen()
+                _slog('prompt REUSE done: isVisible=%s' % (
+                    self._settings_dialog.isVisible(),))
+                return
             except RuntimeError:
                 self._settings_dialog = None
 
-        self._settings_dialog = SettingsDialog(self)
-        self._settings_dialog.hotkey_changed.connect(self._on_hotkey_changed)
-        self._settings_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self._settings_dialog.destroyed.connect(lambda: setattr(self, '_settings_dialog', None))
-        self._settings_dialog.show_tab('prompt')
-        self._settings_dialog.show()
+        _slog('prompt branch=CREATE')
+        # 不传 parent：避免继承浮窗置顶层级导致对话框显示到屏幕外
+        dlg = SettingsDialog(None)
+        self._settings_dialog = dlg
+        dlg.hotkey_changed.connect(self._on_hotkey_changed)
+        dlg._appearance_preview_callback = self._refresh_appearance
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        dlg.show_tab('prompt')
+        dlg.show()
+        dlg._ensure_on_screen()
+        _slog('prompt CREATE done: isVisible=%s' % dlg.isVisible())
     
     def _setup_tray_icon(self):
         """设置系统托盘图标"""
@@ -1654,6 +1845,20 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
 
 
 if __name__ == "__main__":
+    # 说明：stdout/stderr 安全流已在文件顶部（FreeConsole 之前）统一安装，
+    # 此处仅保留未捕获异常的落盘记录，便于排查问题。
+    import traceback
+
+    def _excepthook(etype, value, tb):
+        try:
+            with open(_ARTCO_LOG, 'a', encoding='utf-8') as f:
+                f.write('=== Unhandled Exception ===\n')
+                f.write(''.join(traceback.format_exception(etype, value, tb)))
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
+
     init_database()
     
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -1664,14 +1869,58 @@ if __name__ == "__main__":
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
     
-    # 单实例检测
+    # ── 单实例检测 ──
+    # 注意：进程被强制终止（任务管理器/Stop-Process -Force）时，Qt 不会释放
+    # 共享内存段，残留的"孤儿段"会让新实例误判为"已在运行"并静默退出。
+    # 这里先尝试 attach 探测：若能 attach 但实际无进程存活，则说明是孤儿段，
+    # detach 后重新 create，避免程序再也起不来。
     shared_memory = QSharedMemory("ArtcoSingleInstanceLock")
+
+    def _has_live_instance():
+        """通过枚举窗口判断是否真有另一个 Artco 实例在运行"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            found = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lparam):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if buf.value.strip() == APP_NAME:
+                        pid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value != os.getpid():
+                            found.append(pid.value)
+                            return False
+                return True
+
+            user32.EnumWindows(_enum, 0)
+            return len(found) > 0
+        except Exception:
+            # 探测失败时保守返回 False，宁可多开也不要永远起不来
+            return False
+
     if not shared_memory.create(1):
-        # 已有实例在运行
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.warning(None, "Artco", "程序已在运行中，请查看系统托盘。")
-        sys.exit(0)
-    
+        # create 失败：可能是真有实例，也可能是孤儿段
+        if shared_memory.attach():
+            shared_memory.detach()
+        # 回收后重试一次
+        if not shared_memory.create(1):
+            if _has_live_instance():
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(None, "Artco", "程序已在运行中，请查看系统托盘。")
+                sys.exit(0)
+            # 无存活实例却仍拿不到锁：记录后继续启动，不阻塞用户
+            try:
+                with open(_ARTCO_LOG, 'a', encoding='utf-8') as f:
+                    f.write('[warn] shared memory lock unavailable but no live instance; continuing\n')
+            except Exception:
+                pass
+
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(get_app_icon())
     window = CapsuleWidget()

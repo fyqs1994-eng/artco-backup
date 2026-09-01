@@ -43,6 +43,7 @@ prompts.json
 workspace.json
 wecom_config.json
 google_models_debug.json
+openrouter_models_cache.json
 history_images/
 _build_tmp/
 dist/
@@ -54,19 +55,32 @@ extracted/
 *.tmp
 *.temp
 
+# 一次性临时脚本 / 调试产物
+_g_join.py
+_g*.py
+verify_*.png
+_shot_*.png
+
 # Artco specific
 *.exe
 package-lock.json
 appearance.json
-ArtcoShellExtension/bin/
-ArtcoShellExtension/obj/
-shell_ext/bin/
-shell_ext/obj/
+ArtcoShellExtension/**/bin/
+ArtcoShellExtension/**/obj/
+shell_ext/**/bin/
+shell_ext/**/obj/
+**/bin/Debug/
 **/bin/Release/
+**/bin/x64/
+**/bin/x86/
+**/obj/Debug/
 **/obj/Release/
+**/obj/x64/
+**/obj/x86/
 **/obj/project.assets.json
-**/obj/*.cache
-**/obj/*.nuget.*
+**/obj/project.nuget.cache
+**/obj/**/*.cache
+**/obj/**/*.nuget.*
 screenshot/__pycache__/
 ui/__pycache__/
 
