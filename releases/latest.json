@@ -1,8 +1,8 @@
 {
-    "version": "1.1.1",
+    "version": "1.2.1",
     "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/latest/download/Artco.exe",
-    "changelog": "修复自动更新退出问题（os._exit替代sys.exit）、下载进度显示优化、私有仓库下载认证支持",
-    "sha256": "C41C6F0F942F8B7819BD030586B6BCD4D199041EDCEE5618423356DD6E04905D",
+    "changelog": "更新测试版本：验证自动更新下载与SHA256校验链路（GenCanvas生成工作台、AI服务商重构、模型分类器、打包环境优化）",
+    "sha256": "48FB39794D8C83715925BEBA71E4192BC61B5D7BC0C8253E7A7B0C675D4A69D7",
     "min_required": "1.0.0",
-    "release_date": "2026-08-26"
+    "release_date": "2026-09-01"
 }

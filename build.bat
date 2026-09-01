@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
@@ -13,10 +13,13 @@ echo ============================================
 echo.
 
 if "%1"=="" (
-    echo 用法:
-    echo   build.bat full     - 构建正式版（含 AI API Key）
-    echo   build.bat lite     - 构建脱敏版（不含 AI API Key）
-    echo   build.bat all      - 构建两个版本
+echo 用法:
+echo   build.bat full     - 构建主程序（dist\Artco.exe）
+echo   build.bat lite     - 构建精简版（dist\Artco_Lite.exe）
+echo   build.bat all      - 构建两个版本
+echo.
+echo 说明: 两种模式均只内嵌 ai_config_empty.json（空 Key 模板），
+echo       不含任何真实 API Key，真实配置在 exe 同目录的 ai_config.json。
     echo.
     goto :eof
 )
@@ -51,6 +54,14 @@ pyinstaller Artco.spec --noconfirm
 if errorlevel 1 (
     echo.
     echo [失败] 正式版构建失败！
+    exit /b 1
+)
+
+echo.
+echo [校验] 检查体积是否异常...
+python "%~dp0check_build.py" "dist\Artco.exe"
+if errorlevel 1 (
+    echo.
     exit /b 1
 )
 echo.

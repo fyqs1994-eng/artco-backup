@@ -9,6 +9,18 @@ import sys
 
 block_cipher = None
 
+SPEC_DIR = os.path.abspath(SPECPATH)
+
+
+def collect_package_modules(pkg_name):
+    """自动收集包内所有非私有 .py 模块，避免新增文件时漏配 hiddenimports。"""
+    mods = [pkg_name]
+    pkg_dir = os.path.join(SPEC_DIR, pkg_name)
+    for filename in sorted(os.listdir(pkg_dir)):
+        if filename.endswith('.py') and not filename.startswith('_'):
+            mods.append('{}.{}'.format(pkg_name, filename[:-3]))
+    return mods
+
 # 收集所有需要打包的数据文件
 datas = [
     # 图标资源
@@ -47,38 +59,13 @@ hiddenimports = [
     'dotenv',
     # 更新模块依赖
     'requests',
-    # 项目内部模块
+    # 项目内部模块（自动扫描 ui/ 与 screenshot/ 目录，新增文件无需改这里）
     'config',
     'database',
     'utils',
-    'screenshot',
-    'screenshot.marks',
-    'screenshot.canvas',
-    'screenshot.toolbar',
-    'screenshot.editor',
-    'screenshot.overlay',
-    'screenshot.pin',
-    'screenshot.ocr',
-    'screenshot.cache',
-    'screenshot.utils',
-    'screenshot.window_detect',
-    'ui',
-    'ui.ai_worker',
-    'ui.ai_result',
-    'ui.archive',
-    'ui.assign_panel',
-    'ui.clipboard_float',
-    'ui.feedback_dialog',
-    'ui.image_viewer',
-    'ui.prompt_manager',
-    'ui.settings',
-    'ui.sidebar',
-    'ui.theme',
-    'ui.workbench',
-    # 版本和更新模块
     'version',
     'updater',
-]
+] + collect_package_modules('screenshot') + collect_package_modules('ui')
 
 a = Analysis(
     ['main.py'],
