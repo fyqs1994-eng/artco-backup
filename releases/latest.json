@@ -1,6 +1,6 @@
 {
     "version": "1.2.9",
-    "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/latest/download/Artco.exe",
+    "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/download/v1.2.9/Artco.exe",
     "changelog": "【测试版本】验证自动更新链路：下载进度显示、SHA256 校验、自动重启替换",
     "sha256": "95E46C54207EF63E4E326F0E9370285FD32B72B3AD0654D1255D404F4BE3DA8C",
     "min_required": "1.0.0",
