@@ -259,6 +259,11 @@ class SettingsDialog(QDialog):
     """设置对话框 — Raycast 风格"""
     hotkey_changed = Signal()
     update_check_result = Signal(bool, object)
+    # 下载进度用信号跨线程回传：普通 threading.Thread 没有 Qt 事件循环，
+    # 在该线程里调用 QTimer.singleShot(0, ...) 永远不会触发。
+    update_download_progress = Signal(float)  # >=0 为 0.0~1.0 比例；<0 为已下载字节数取负（不确定模式）
+    update_download_done = Signal(str)  # 下载完成，参数为新 exe 路径
+    update_download_failed = Signal(str)  # 下载失败原因
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -270,6 +275,9 @@ class SettingsDialog(QDialog):
         self._prompt_data: list = []
         self._update_check_timer = None
         self.update_check_result.connect(self._on_check_result)
+        self.update_download_progress.connect(self._on_download_progress)
+        self.update_download_done.connect(self._on_download_done)
+        self.update_download_failed.connect(self._on_download_fail)
         # 异步拉取 OpenRouter 模型缓存（后台线程，不阻塞 UI）
         model_classifier.ensure_cache_ready()
         self.init_ui()
@@ -2073,24 +2081,37 @@ class SettingsDialog(QDialog):
         self._update_progress.setMinimumWidth(400)
         self._update_progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._update_progress.setAutoClose(False)
+        self._update_progress.setAutoReset(False)  # 到达 100% 时不要自动清零
         self._update_cancelled = False
         self._update_info = info
         self._update_progress.canceled.connect(lambda: setattr(self, '_update_cancelled', True))
         self._update_progress.show()
 
         def download_thread():
+            # 普通 threading.Thread 无 Qt 事件循环，QTimer.singleShot(0, ...) 不会触发，
+            # 必须用信号回传主线程，否则进度条永远不动。
             try:
                 new_path = updater_mod.download_update(
                     info,
-                    progress_callback=lambda r: QTimer.singleShot(0, lambda: self._update_progress.setValue(int(r * 100)) if r >= 0 else self._update_progress.setLabelText(f"正在下载… 已下载 {-r / (1024 * 1024):.1f} MB"))
+                    progress_callback=self.update_download_progress.emit,
+                    should_cancel=lambda: self._update_cancelled,
                 )
                 if self._update_cancelled:
                     return
-                QTimer.singleShot(0, lambda: self._on_download_done(new_path))
+                self.update_download_done.emit(new_path)
             except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_download_fail(str(e)))
+                self.update_download_failed.emit(str(e))
 
         threading.Thread(target=download_thread, daemon=True).start()
+
+    def _on_download_progress(self, ratio: float):
+        """下载进度（信号投递，运行在主线程，可直接操作 UI）"""
+        if not hasattr(self, '_update_progress') or self._update_progress is None:
+            return
+        if ratio >= 0:
+            self._update_progress.setValue(int(ratio * 100))
+        else:
+            self._update_progress.setLabelText(f"正在下载… 已下载 {-ratio / (1024 * 1024):.1f} MB")
 
     def _on_download_done(self, new_path):
         self._update_progress.setValue(100)

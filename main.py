@@ -192,6 +192,11 @@ class CapsuleWidget(QWidget):
     clipboard_float_requested = Signal()  # 请求显示剪贴板悬浮面板
     update_check_result = Signal(bool, object)  # 检查更新结果
     update_check_timeout = Signal()  # 检查更新超时
+    # 下载进度用信号跨线程回传：普通 threading.Thread 没有 Qt 事件循环，
+    # 在该线程里调用 QTimer.singleShot(0, ...) 永远不会触发。
+    update_download_progress = Signal(float)  # >=0 为 0.0~1.0 比例；<0 为已下载字节数取负（不确定模式）
+    update_download_done = Signal(str)  # 下载完成，参数为新 exe 路径
+    update_download_failed = Signal(str)  # 下载失败原因
     
     def _build_bg_css(self, border_radius: int = None, border: str = None, border_color: str = None) -> str:
         """从 appearance_config 动态生成 #container 背景样式"""
@@ -228,6 +233,9 @@ class CapsuleWidget(QWidget):
         self.clipboard_float_requested.connect(self._show_clipboard_float)
         self.update_check_result.connect(self._on_tray_update_result)
         self.update_check_timeout.connect(self._on_tray_update_timeout)
+        self.update_download_progress.connect(self._on_download_progress)
+        self.update_download_done.connect(self._on_download_complete)
+        self.update_download_failed.connect(self._on_download_error)
         
         self.init_ui()
         self._saved_pos = None
@@ -1600,6 +1608,7 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         self._update_progress.setMinimumWidth(400)
         self._update_progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         self._update_progress.setAutoClose(False)
+        self._update_progress.setAutoReset(False)  # 到达 100% 时不要自动清零
         self._update_progress.canceled.connect(self._cancel_update_download)
         self._update_info = info
         self._update_cancelled = False
@@ -1608,27 +1617,32 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         threading.Thread(target=self._download_thread, daemon=True).start()
 
     def _download_thread(self):
-        """后台下载线程"""
+        """后台下载线程
+        注意：此处是普通 threading.Thread，没有 Qt 事件循环，
+        QTimer.singleShot(0, ...) 不会触发，必须用信号回传主线程。
+        """
         try:
             new_path = updater.download_update(
                 self._update_info,
-                progress_callback=self._on_download_progress
+                progress_callback=self.update_download_progress.emit,
+                should_cancel=lambda: self._update_cancelled,
             )
             if self._update_cancelled:
                 return
-            QTimer.singleShot(0, lambda: self._on_download_complete(new_path))
+            self.update_download_done.emit(new_path)
         except Exception as e:
-            QTimer.singleShot(0, lambda: self._on_download_error(str(e)))
+            self.update_download_failed.emit(str(e))
 
     def _on_download_progress(self, ratio: float):
-        """下载进度回调（在下载线程中调用，需通过 QTimer 切回主线程）"""
+        """下载进度回调（信号已跨线程投递，此处运行在主线程，可直接操作 UI）"""
+        if not hasattr(self, '_update_progress') or self._update_progress is None:
+            return
         if ratio < 0:
             # 不确定模式：content-length 缺失，显示已下载 MB
             downloaded_mb = -ratio / (1024 * 1024)
-            QTimer.singleShot(0, lambda: self._update_progress.setLabelText(f"正在下载… 已下载 {downloaded_mb:.1f} MB"))
+            self._update_progress.setLabelText(f"正在下载… 已下载 {downloaded_mb:.1f} MB")
         else:
-            percent = int(ratio * 100)
-            QTimer.singleShot(0, lambda: self._update_progress.setValue(percent))
+            self._update_progress.setValue(int(ratio * 100))
 
     def _on_download_complete(self, new_path: str):
         """下载完成，启动 Updater 替换"""

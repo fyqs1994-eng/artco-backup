@@ -164,11 +164,12 @@ def _compute_sha256(file_path: str) -> str:
     return h.hexdigest()
 
 
-def download_update(update_info: dict, progress_callback=None) -> str:
+def download_update(update_info: dict, progress_callback=None, should_cancel=None) -> str:
     """下载新版本到临时目录
-    progress_callback: 可选回调，参数为 0.0~1.0 的进度比例
+    progress_callback: 可选回调，参数为 0.0~1.0 的进度比例（负值表示不确定模式）
+    should_cancel: 可选回调，返回 True 时中断下载（用于"取消"按钮）
     返回: 下载的文件路径
-    异常: 下载失败或校验失败时抛出
+    异常: 下载失败、用户取消或校验失败时抛出
     """
     import requests
 
@@ -185,17 +186,44 @@ def download_update(update_info: dict, progress_callback=None) -> str:
 
     total = int(resp.headers.get("content-length", 0))
     downloaded = 0
+    last_reported = -1.0  # 上次上报的比例，用于节流
 
-    with open(target_path, "wb") as f:
-        for chunk in resp.iter_content(8192):
-            f.write(chunk)
-            downloaded += len(chunk)
-            if progress_callback:
-                if total > 0:
-                    progress_callback(downloaded / total)
-                else:
-                    # content-length 缺失时，按已下载 MB 数反馈进度（负值表示不确定模式）
-                    progress_callback(-downloaded)
+    try:
+        with open(target_path, "wb") as f:
+            for chunk in resp.iter_content(8192):
+                if should_cancel and should_cancel():
+                    raise InterruptedError("用户取消下载")
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback:
+                    if total > 0:
+                        ratio = downloaded / total
+                        # 节流：仅在百分比变化或下载完成时上报，避免淹没主线程
+                        if ratio >= 1.0 or int(ratio * 100) != int(last_reported * 100):
+                            last_reported = ratio
+                            progress_callback(ratio)
+                    else:
+                        # content-length 缺失时，按已下载字节数反馈进度（负值表示不确定模式）
+                        if downloaded - (-last_reported) >= 1024 * 1024 or last_reported < 0:
+                            last_reported = -downloaded
+                            progress_callback(-downloaded)
+    except InterruptedError:
+        # 用户取消：清理临时文件后向上抛出
+        try:
+            resp.close()
+        except Exception:
+            pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    if progress_callback and total > 0 and last_reported < 1.0:
+        # 节流可能吞掉最后一次上报，这里补发 100%
+        progress_callback(1.0)
 
     # SHA256 校验
     expected_sha = update_info.get("sha256", "")
@@ -256,9 +284,9 @@ def apply_update(new_exe_path: str):
     os._exit(0)
 
 
-def do_full_update(update_info: dict, progress_callback=None):
+def do_full_update(update_info: dict, progress_callback=None, should_cancel=None):
     """完整更新流程：下载 + 校验 + 启动 Updater + 退出
     供 UI 调用，调用后程序会退出
     """
-    new_path = download_update(update_info, progress_callback)
+    new_path = download_update(update_info, progress_callback, should_cancel)
     apply_update(new_path)
