@@ -1,8 +1,8 @@
 {
-    "version": "1.2.2",
-    "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/download/v1.2.2/Artco.exe",
-    "changelog": "修复自动更新下载进度条不动、进度到 100% 被清零、取消按钮无法中断下载的问题",
-    "sha256": "494803D812F17E65063717A3AE16BEEB011CAF8B09B6CDC04BCEFE8F162339D6",
+    "version": "1.2.3",
+    "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/download/v1.2.3/Artco.exe",
+    "changelog": "剔除未使用的 Qt 重量级 DLL（Qml/Quick/Pdf/OpenGL/DataVisualization），安装包体积由 105MB 降至 87MB",
+    "sha256": "1C21E3A5D67F54B5340F91581BE5A1E91855960DBADEEC4E2DEE813AC3A8379B",
     "min_required": "1.0.0",
-    "release_date": "2026-09-03"
+    "release_date": "2026-09-04"
 }
