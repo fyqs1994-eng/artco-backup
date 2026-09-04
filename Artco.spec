@@ -98,11 +98,37 @@ a = Analysis(
         'PyQt6.QtWidgets', # 防止误打包
         'PyQt6.QtCore',    # 防止误打包
         'PyQt6.QtGui',     # 防止误打包
+        # Qt 重量级模块：项目纯 QWidget/QPainter 实现，以下均未使用，体积合计约 29MB
+        'PySide6.QtQml',              # Qt6Qml.dll 5.01MB
+        'PySide6.QtQuick',            # Qt6Quick.dll 5.99MB
+        'PySide6.QtQmlModels',        # Qt6QmlModels.dll 0.71MB
+        'PySide6.QtOpenGL',           # QtOpenGL.pyd 8.46MB
+        'PySide6.QtOpenGLWidgets',
+        'PySide6.QtPdf',              # Qt6Pdf.dll 5.09MB
+        'PySide6.QtPdfWidgets',
+        'PySide6.QtDataVisualization',# Qt6DataVisualization.dll 1.15MB
     ],
     cipher=block_cipher,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+# 剔除未使用的 Qt 重量级 DLL：项目纯 QWidget/QPainter 实现，不需要 QML/Quick/PDF/OpenGL。
+# 注意：excludes 只能挡住 Python 模块，挡不住 PySide6 hook 收集的 C++ DLL，故此处在打包前过滤。
+_EXCLUDE_BIN_SUFFIXES = (
+    'opengl32sw.dll',           # 19.68MB Mesa 软件 OpenGL 兜底
+    'Qt6Qml.dll',               # 5.01MB
+    'Qt6QmlMeta.dll',           # 0.14MB
+    'Qt6QmlModels.dll',         # 0.71MB
+    'Qt6QmlWorkerScript.dll',   # 0.07MB
+    'Qt6Quick.dll',             # 5.99MB
+    'Qt6Pdf.dll',               # 5.09MB
+    'Qt6OpenGL.dll',            # 1.88MB
+)
+_suffixes = tuple(s.lower() for s in _EXCLUDE_BIN_SUFFIXES)
+_dropped = [e[0] for e in a.binaries if e[0].lower().endswith(_suffixes)]
+a.binaries = [e for e in a.binaries if not e[0].lower().endswith(_suffixes)]
+print('[Artco.spec] 剔除未使用 Qt DLL: {}'.format(_dropped))
 
 exe = EXE(
     pyz,

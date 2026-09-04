@@ -2,14 +2,17 @@
 打包产物校验脚本 — 体积异常时报错退出，防止 exe 无声膨胀。
 
 用法: python check_build.py <exe路径>
-阈值依据历史正常构建: Artco.exe 约 105 MB。
+阈值依据历史正常构建:
+  - 2026-09-04 前: Artco.exe 约 105 MB
+  - 2026-09-04 起: 剔除未使用的 Qt 重量级 DLL（Qml/Quick/Pdf/OpenGL/
+    DataVisualization/opengl32sw）后约 87 MB，阈值相应下调。
 """
 
 import os
 import sys
 
-# 体积阈值（MB）: 正常约 105，低于下限说明模块缺失，高于上限说明打进了无关大包
-MIN_MB = 90.0
+# 体积阈值（MB）: 正常约 87（瘦身后），低于下限说明模块缺失，高于上限说明打进了无关大包
+MIN_MB = 80.0
 MAX_MB = 130.0
 
 
