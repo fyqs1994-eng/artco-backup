@@ -1,7 +1,7 @@
 {
     "version": "1.2.4",
-    "url": "https://github.com/fyqs1994-eng/Artco-backup/releases/download/v1.2.4/Artco.exe",
-    "changelog": "LightAI 生图模型扩充：新增 gpt-image-2、即梦 seedream 5.0 pro/lite；修复服务商模型选择互相串扰、验证按钮无反馈与参数错误；计费身份改为设置项并脱敏",
+    "url": "https://github.com/fyqs1994-eng/artco-backup/releases/download/v1.2.4/Artco.exe",
+    "changelog": "LightAI 生图模型扩充：新增 gpt-image-2、即梦 seedream 5.0 pro/lite；修复服务商模型选择串扰、验证按钮无反馈与参数错误；计费身份改为设置项并脱敏",
     "sha256": "AEEB5D4D85444D30FCCF236C965A76EC5294C5FBF12153D528219A0B97A0257B",
     "min_required": "1.0.0",
     "release_date": "2026-09-08"
