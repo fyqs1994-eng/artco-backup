@@ -472,6 +472,7 @@ class CapsuleWidget(QWidget):
         from screenshot.editor import EditorWindow
         app = QApplication.instance()
         editor = EditorWindow(pixmap)
+        editor.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         editor.show()
         if not hasattr(app, '_editor_windows'):
             app._editor_windows = []
@@ -507,6 +508,7 @@ class CapsuleWidget(QWidget):
         # 连接编辑请求信号
         def on_edit_requested(edit_pixmap):
             editor = EditorWindow(edit_pixmap)
+            editor.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             editor.show()
             if not hasattr(app, '_editor_windows'):
                 app._editor_windows = []
@@ -1200,12 +1202,14 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             self.overlay = None
             return
         
-        # 检查是否需要自动分析剪贴板
-        if hasattr(self, '_pending_clipboard_analyze') and self._pending_clipboard_analyze:
+        # 检查是否需要自动分析剪贴板（ESC 取消时剪贴板不会有新图，需继续复原胶囊）
+        if getattr(self, '_pending_clipboard_analyze', False):
             self._pending_clipboard_analyze = False
-            # 延迟一点确保剪贴板已更新
-            QTimer.singleShot(200, self._ai_analyze_clipboard)
-            return
+            clipboard = QGuiApplication.clipboard()
+            if not clipboard.pixmap().isNull() or clipboard.mimeData().hasImage():
+                # 延迟一点确保剪贴板已更新
+                QTimer.singleShot(200, self._ai_analyze_clipboard)
+                return
         
         self._restore_position()
     
@@ -1882,7 +1886,8 @@ if __name__ == "__main__":
     font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
-    
+
+
     # ── 单实例检测 ──
     # 注意：进程被强制终止（任务管理器/Stop-Process -Force）时，Qt 不会释放
     # 共享内存段，残留的"孤儿段"会让新实例误判为"已在运行"并静默退出。

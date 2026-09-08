@@ -1836,6 +1836,7 @@ class ScreenshotOverlay(QWidget):
         def on_edit_requested(edit_pixmap):
             from .editor import EditorWindow
             editor = EditorWindow(edit_pixmap)
+            editor.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             editor.show()
             # 保持编辑器引用
             if not hasattr(app, '_editor_windows'):

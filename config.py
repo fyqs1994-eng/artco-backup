@@ -71,6 +71,54 @@ AI_MODELS = {
     ]
 }
 
+# --- LightAI 模型（内部网关，异步提交 + 轮询） ---
+# 视觉/对话：gemini-3-flash-preview 等；生图：模型名含 image，由网关自动推断为生图任务
+LIGHTAI_VISION_MODELS = [
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite-preview",
+]
+
+LIGHTAI_IMAGE_GEN_MODELS = [
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-pro-image-preview",
+    # 即梦（jimeng_app）：实测可用的是精确 ID，模型名带 -pro/-lite 等后缀与
+    # 日期版本，不可自行简写或推断（试过 5-0、5-0-pro、4-5-pro 等变体全部失败）。
+    # 坑：lite 与 pro 的日期后缀不同！pro 是 260628，lite 是 260128，
+    # 按 pro 的日期去推 lite（260628）会得到 202 提交成功但任务 404 失败。
+    "doubao-seedream-5-0-pro-260628",
+    "doubao-seedream-5-0-lite-260128",
+    "doubao-seedream-4-0-250828",
+    # ChatGPT（gpt_app）：实测仅 gpt-image-2 可用，走 prompt 字段。
+    "gpt-image-2",
+]
+
+# ChatGPT（gpt_app）服务说明（2026-09-07 实测）：
+# 1) 网关按模型名分流请求格式：只认得的模型名走 prompt 字段，
+#    不认得的一律回落 responses 格式（报「缺少必填参数: input」）。
+#    因此「报缺少 input」等价于「该模型名不存在」，可作为探测信号。
+# 2) 实测仅 gpt-image-2 真实可用（返回 202 + success，出图成功）。
+#    其余 gpt-image-1 / -1-mini / -2-mini / -3 / gpt-4o / gpt-5 系列
+#    全部不存在，且响应的是 Azure DeploymentNotFound。
+# 3) gpt-image-2 走 prompt 字段（非 input），返回结构与 Gemini 一致
+#    （candidates[].content.parts[].inlineData），复用现有解析即可。
+# 4) 即梦同 gpt_app：模型 ID 必须精确（含 -pro- 与日期后缀），
+#    自行简写/推断的变体一律失败。已知可用 doubao-seedream-5-0-pro-260628。
+LIGHTAI_GPT_MODELS: list = [
+    "gpt-image-2",
+]
+
+# 追加到 AI_MODELS，使设置页模型下拉框能正常展示
+AI_MODELS["vision"].extend(
+    {"id": m, "name": f"LightAI {m}", "provider": "lightai"}
+    for m in LIGHTAI_VISION_MODELS
+)
+AI_MODELS["image_gen"].extend(
+    {"id": m, "name": f"LightAI {m}", "provider": "lightai"}
+    for m in LIGHTAI_IMAGE_GEN_MODELS
+)
+
 # --- AI 服务商配置 ---
 AI_PROVIDERS = {
     "google": {
@@ -100,7 +148,14 @@ AI_PROVIDERS = {
         "key_url": "https://platform.seedream.io/",
         "default_vision": "seedream-3-0",
         "default_image_gen": "seedream-3-0",
-    }
+    },
+    "lightai": {
+        "name": "LightAI（内部）",
+        "models": LIGHTAI_VISION_MODELS + LIGHTAI_IMAGE_GEN_MODELS,
+        "key_url": "",
+        "default_vision": "gemini-3-flash-preview",
+        "default_image_gen": "gemini-3.1-flash-image-preview",
+    },
 }
 
 # --- 默认配置 ---
@@ -108,19 +163,28 @@ DEFAULT_AI_CONFIG = {
     "task_type": "vision",
     "vision_model": "gemini-2.5-flash",
     "image_gen_model": "imagen-3.0-generate-001",
-    "enabled_providers": ["google", "openai", "anthropic", "seedream"],
+    "enabled_providers": ["google", "openai", "anthropic", "seedream", "lightai"],
     "current_provider": "google",
     "api_keys": {
         "google": "",
         "openai": "",
         "anthropic": "",
-        "seedream": ""
+        "seedream": "",
+        "lightai": ""
     },
     "api_base_urls": {
         "google": "",
         "openai": "",
         "anthropic": "",
-        "seedream": ""
+        "seedream": "",
+        "lightai": ""
+    },
+    # LightAI _app 系列服务的计费身份头（X-User-Id / X-Company / X-User-Type）
+    # user_id 留空时由客户端回退到内置默认值
+    "lightai_billing": {
+        "user_id": "",
+        "company": "tencent-formal",
+        "user_type": "internal"
     },
     "custom_providers": []
 }
@@ -411,7 +475,49 @@ class AIConfigManager:
             self._config["api_base_urls"] = {}
         self._config["api_base_urls"][provider] = url
         self._save_config()
+
+    def get_lightai_billing(self):
+        """获取 LightAI 计费身份（user_id / company / user_type）"""
+        billing = self._config.get("lightai_billing") or {}
+        return {
+            "user_id": billing.get("user_id", ""),
+            "company": billing.get("company", "tencent-formal"),
+            "user_type": billing.get("user_type", "internal"),
+        }
+
+    def set_lightai_billing(self, user_id, company, user_type):
+        """设置 LightAI 计费身份"""
+        self._config["lightai_billing"] = {
+            "user_id": user_id,
+            "company": company,
+            "user_type": user_type,
+        }
+        self._save_config()
     
+    def get_models_for_provider(self, provider_id, kind="vision"):
+        """获取某服务商可用的模型 ID 列表
+
+        动态拉取的列表优先（如 google_vision_models），其次是内置 AI_MODELS。
+        注意：模型 ID 在不同服务商间可能重名（如 gemini-3-flash-preview
+        同时存在于 Google 与 LightAI），因此归属必须以此方法为准，
+        不能拿 AI_MODELS 的 provider 字段去反推。
+        """
+        dynamic = self._config.get(f"{provider_id}_{kind}_models", [])
+        if dynamic:
+            return list(dynamic)
+        return [m["id"] for m in AI_MODELS.get(kind, []) if m.get("provider") == provider_id]
+
+    def get_provider_model_choice(self, provider_id, kind="vision"):
+        """获取某服务商已保存的模型选择（服务商间互不干扰）"""
+        choices = self._config.get("provider_model_choices", {})
+        return choices.get(provider_id, {}).get(kind, "")
+
+    def set_provider_model_choice(self, provider_id, kind, model_id):
+        """保存某服务商的模型选择"""
+        choices = self._config.setdefault("provider_model_choices", {})
+        choices.setdefault(provider_id, {})[kind] = model_id
+        self._save_config()
+
     def get_current_model(self):
         """获取当前选择的模型"""
         task_type = self._config.get("task_type", "vision")

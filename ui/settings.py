@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QProgressDialog, QFileDialog, QSlider, QSpinBox, QGridLayout,
     QGraphicsDropShadowEffect, QApplication, QTextEdit, QRadioButton, QCheckBox,
 )
-from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer
+from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer, QThread
 from PySide6.QtGui import QKeySequence, QColor
 import qtawesome as qta
 
@@ -58,6 +58,33 @@ from ui.theme import (
 
 
 # ── helper utilities ──────────────────────────────────────────
+
+class _VerifyWorker(QThread):
+    """在子线程执行 API Key 验证
+
+    验证要发真实网络请求（LightAI 还要提交任务），耗时可达数十秒。
+    原先放在主线程同步执行会冻结界面，用户点了按钮却看不到任何反应，
+    看起来就像"没有反馈"。这里改为子线程 + 信号回传。
+    """
+
+    finished = Signal(bool, str, object)  # success, message, models
+
+    def __init__(self, provider_id, api_key, base_url, fn):
+        super().__init__()
+        self._provider_id = provider_id
+        self._api_key = api_key
+        self._base_url = base_url
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn(self._api_key, self._base_url)
+            if not (isinstance(result, tuple) and len(result) == 3):
+                result = (False, "验证函数返回格式异常", {})
+            self.finished.emit(*result)
+        except Exception as e:
+            self.finished.emit(False, f"验证出错: {e}", {})
+
 
 def get_app_path():
     if getattr(sys, 'frozen', False):
@@ -1244,6 +1271,65 @@ class SettingsDialog(QDialog):
         L.addWidget(self._provider_base_url)
         L.addSpacing(_BLOCK_GAP)
 
+        # LightAI 专属：计费身份（_app 系列服务的必填请求头）
+        self._lightai_user_id = None
+        self._lightai_company = None
+        self._lightai_user_type = None
+        if provider_id == "lightai":
+            L.addWidget(self._section("计费身份"))
+            L.addSpacing(_SEC_GAP)
+
+            lbl_uid = QLabel("用户邮箱")
+            lbl_uid.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+            L.addWidget(lbl_uid)
+            L.addSpacing(4)
+            self._lightai_user_id = LineEdit()
+            self._lightai_user_id.setPlaceholderText("例如 name@tencent.com")
+            self._lightai_user_id.setFixedHeight(_ROW_H)
+            L.addWidget(self._lightai_user_id)
+            L.addSpacing(_ROW_GAP)
+
+            lbl_company = QLabel("公司主体")
+            lbl_company.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+            L.addWidget(lbl_company)
+            L.addSpacing(4)
+            self._lightai_company = ComboBox()
+            self._lightai_company.setFixedHeight(_ROW_H)
+            for label, val in (
+                ("腾讯-正式", "tencent-formal"),
+                ("腾讯-子公司", "tencent-subsidiary"),
+                ("腾讯-v岗", "tencent-v"),
+            ):
+                self._lightai_company.addItem(label, val)
+            L.addWidget(self._lightai_company)
+            L.addSpacing(_ROW_GAP)
+
+            lbl_utype = QLabel("用户类型")
+            lbl_utype.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+            L.addWidget(lbl_utype)
+            L.addSpacing(4)
+            self._lightai_user_type = ComboBox()
+            self._lightai_user_type.setFixedHeight(_ROW_H)
+            self._lightai_user_type.addItem("内部员工", "internal")
+            self._lightai_user_type.addItem("外部员工", "external")
+            L.addWidget(self._lightai_user_type)
+            L.addSpacing(4)
+
+            hint = QLabel("用于 LightAI 计费归属，邮箱需已在平台关联项目")
+            hint.setStyleSheet(f"color:{TEXT_TERTIARY}; font-size:11px;")
+            hint.setWordWrap(True)
+            L.addWidget(hint)
+
+            saved = ai_config.get_lightai_billing()
+            self._lightai_user_id.setText(saved.get("user_id", ""))
+            self._lightai_company.setCurrentIndex(
+                max(self._lightai_company.findData(saved.get("company")), 0)
+            )
+            self._lightai_user_type.setCurrentIndex(
+                max(self._lightai_user_type.findData(saved.get("user_type")), 0)
+            )
+            L.addSpacing(_BLOCK_GAP)
+
         # section: 模型
         L.addWidget(self._section("模型"))
         L.addSpacing(_SEC_GAP)
@@ -1271,14 +1357,16 @@ class SettingsDialog(QDialog):
         self._vision_model_combo.setFixedHeight(_ROW_H)
         if all_vision:
             for mid in all_vision:
-                dn = mid
-                for m in AI_MODELS.get("vision", []):
-                    if m["id"] == mid:
-                        dn = m.get("name", mid)
-                        break
+                # 显示名只在本服务商范围内查找：模型 ID 跨服务商重名时，
+                # 全局查找会把 Google 的项显示成 LightAI 前缀
+                dn = self._display_name(mid, "vision", provider_id)
                 self._vision_model_combo.addItem(dn)
                 self._vision_model_combo.setItemData(self._vision_model_combo.count() - 1, mid)
-            saved_v = ai_config.get("vision_model", provider.get("default_vision"))
+            saved_v = ai_config.get_provider_model_choice(provider_id, "vision")
+            if not saved_v or saved_v not in all_vision:
+                saved_v = provider.get("default_vision")
+                if saved_v not in all_vision:
+                    saved_v = all_vision[0]
             idx = self._vision_model_combo.findData(saved_v)
             self._vision_model_combo.setCurrentIndex(max(idx, 0))
         else:
@@ -1310,14 +1398,14 @@ class SettingsDialog(QDialog):
         self._image_gen_model_combo.setFixedHeight(_ROW_H)
         if all_img:
             for mid in all_img:
-                dn = mid
-                for m in AI_MODELS.get("image_gen", []):
-                    if m["id"] == mid:
-                        dn = m.get("name", mid)
-                        break
+                dn = self._display_name(mid, "image_gen", provider_id)
                 self._image_gen_model_combo.addItem(dn)
                 self._image_gen_model_combo.setItemData(self._image_gen_model_combo.count() - 1, mid)
-            saved_ig = ai_config.get("image_gen_model", provider.get("default_image_gen"))
+            saved_ig = ai_config.get_provider_model_choice(provider_id, "image_gen")
+            if not saved_ig or saved_ig not in all_img:
+                saved_ig = provider.get("default_image_gen")
+                if saved_ig not in all_img:
+                    saved_ig = all_img[0]
             idx = self._image_gen_model_combo.findData(saved_ig)
             self._image_gen_model_combo.setCurrentIndex(max(idx, 0))
         else:
@@ -1327,6 +1415,19 @@ class SettingsDialog(QDialog):
         L.addSpacing(_BLOCK_GAP)
 
         L.addStretch()
+
+    def _display_name(self, model_id, kind, provider_id):
+        """取模型显示名，只在该服务商范围内查找
+
+        模型 ID 跨服务商重名（gemini-3-flash-preview 同时属于 Google 和
+        LightAI），全局查找会串名。查不到时直接返回 ID，不臆造前缀。
+        """
+        allowed = ai_config.get_models_for_provider(provider_id, kind)
+        if model_id in allowed:
+            for m in AI_MODELS.get(kind, []):
+                if m["id"] == model_id and m.get("provider") == provider_id:
+                    return m.get("name", model_id)
+        return model_id
 
     def _add_provider(self):
         from config import AI_PROVIDERS
@@ -1389,10 +1490,44 @@ class SettingsDialog(QDialog):
             self._delete_provider_by_id(pid)
 
     def _set_default_provider(self, provider_id):
+        """设为默认服务商
+
+        必须同时把视觉/生图模型切成该服务商自己的模型，否则会沿用上一个
+        服务商的模型 ID（例如切到 Google 后仍带着 LightAI 的模型 ID），
+        导致实际调用时模型与服务商不匹配。
+        """
         from config import AI_PROVIDERS
+
         ai_config.set_current_provider_selected(provider_id)
+        self._apply_provider_default_models(provider_id)
         self._refresh_provider_list()
         self._show_provider_detail(provider_id)
+
+    def _apply_provider_default_models(self, provider_id):
+        """切换默认服务商时，同步该服务商的模型
+
+        优先沿用该服务商上次选的模型；没有记录时才用内置默认模型。
+        image_gen_provider 是生图调用时独立读取的字段（不读 current_provider），
+        这里必须一并更新，否则设为默认后生图仍走上一个服务商。
+        """
+        from config import AI_PROVIDERS
+
+        info = self._get_provider_info(provider_id)
+        if not info:
+            return
+
+        saved_v = ai_config.get_provider_model_choice(provider_id, "vision")
+        if not saved_v:
+            saved_v = info.get("default_vision") or (AI_PROVIDERS.get(provider_id, {}).get("default_vision", ""))
+        if saved_v:
+            ai_config.set("vision_model", saved_v)
+
+        saved_ig = ai_config.get_provider_model_choice(provider_id, "image_gen")
+        if not saved_ig:
+            saved_ig = info.get("default_image_gen") or (AI_PROVIDERS.get(provider_id, {}).get("default_image_gen", ""))
+        if saved_ig:
+            ai_config.set("image_gen_model", saved_ig)
+            ai_config.set("image_gen_provider", provider_id)
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -1612,52 +1747,96 @@ class SettingsDialog(QDialog):
         provider_id = self._current_provider_detail
         api_key = self._provider_key_input.text().strip()
         if not api_key:
-            self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
-            self._verify_status_lbl.setText("⚠ 请输入 API Key")
+            self._set_verify_status("⚠ 请输入 API Key", ok=False)
             return
+
+        # 计费身份等界面输入先落盘，验证函数在子线程里读配置
+        self._save_lightai_billing()
+        base_url = ""
+        if hasattr(self, "_provider_base_url"):
+            base_url = self._provider_base_url.text().strip()
+
+        # 选定验证函数（自定义服务商走通用 OpenAI 兼容验证）
+        if ai_config.is_custom_provider(provider_id):
+            fn = lambda k, _u: self._verify_custom_key(k, ai_config.get_api_base_url(provider_id))
+        else:
+            verify_map = {
+                "google": self._verify_google_key,
+                "openai": self._verify_openai_key,
+                "anthropic": self._verify_anthropic_key,
+                "seedream": self._verify_seedream_key,
+                "lightai": self._verify_lightai_key,
+            }
+            fn = verify_map.get(provider_id)
+            if fn is None:
+                self._set_verify_status(f"✗ 未知服务商: {provider_id}", ok=False)
+                return
+            # 内置验证函数只接收 api_key，统一包装成 (key, base_url) 两参数。
+            # 必须用默认参数 _f 绑定，否则 lambda 体内引用的是赋值后的自身，会无限递归。
+            fn = lambda k, _u, _f=fn: _f(k)
+
         self._btn_verify_key.setEnabled(False)
         self._btn_verify_key.setText("验证中…")
-        self._verify_status_lbl.setStyleSheet(f"color:{TEXT_TERTIARY}; font-size:11px;")
-        self._verify_status_lbl.setText("正在验证…")
+        self._set_verify_status("正在验证…（最长约 30 秒）", pending=True)
         # 触发异步拉取 OpenRouter 模型缓存（不阻塞验证流程）
         model_classifier.ensure_cache_ready()
-        try:
-            # 自定义服务商走通用 OpenAI 兼容验证
-            if ai_config.is_custom_provider(provider_id):
-                base_url = ai_config.get_api_base_url(provider_id)
-                success, message, models = self._verify_custom_key(api_key, base_url)
-            else:
-                verify_map = {
-                    "google": self._verify_google_key,
-                    "openai": self._verify_openai_key,
-                    "anthropic": self._verify_anthropic_key,
-                    "seedream": self._verify_seedream_key,
-                }
-                fn = verify_map.get(provider_id)
-                if fn:
-                    success, message, models = fn(api_key)
-                else:
-                    success, message, models = False, f"未知服务商: {provider_id}", {}
 
-            if success:
-                self._verify_status_lbl.setStyleSheet(f"color:#52c41a; font-size:11px;")
-                self._verify_status_lbl.setText(f"✓ {message}")
-                ai_config.set_api_key(provider_id, api_key)
-                if hasattr(self, '_provider_base_url'):
-                    ai_config.set_api_base_url(provider_id, self._provider_base_url.text().strip())
+        self._verify_worker = _VerifyWorker(provider_id, api_key, base_url, fn)
+        self._verify_worker.finished.connect(
+            lambda ok, msg, models: self._on_verify_done(provider_id, api_key, ok, msg, models)
+        )
+        self._verify_worker.start()
+
+    def _set_verify_status(self, text, ok=None, pending=False):
+        """更新验证状态标签
+
+        面板重建会新建 QLabel，所以这里每次都按属性现取，
+        不缓存控件引用，避免用到已被销毁的旧对象。
+        """
+        lbl = getattr(self, "_verify_status_lbl", None)
+        if lbl is None:
+            return
+        if pending:
+            color = TEXT_TERTIARY
+        else:
+            color = "#52c41a" if ok else COLOR_ERROR
+        lbl.setStyleSheet(f"color:{color}; font-size:11px;")
+        lbl.setText(text)
+
+    def _on_verify_done(self, provider_id, api_key, success, message, models):
+        """验证完成的收尾：写配置、重建面板、再显示结果
+
+        顺序很关键：成功时会重建右侧面板（要刷新模型下拉框），
+        而重建会销毁并新建状态标签。若先显示结果再重建，
+        提示会被一起冲掉，表现为"点了没反应"。所以先重建、后显示。
+        """
+        if success:
+            ai_config.set_api_key(provider_id, api_key)
+            if hasattr(self, "_provider_base_url"):
+                ai_config.set_api_base_url(provider_id, self._provider_base_url.text().strip())
+            if models:
                 ai_config.set(f"{provider_id}_vision_models", models.get("vision", []))
                 ai_config.set(f"{provider_id}_image_gen_models", models.get("image_gen", []))
-                self._refresh_provider_list()
-                self._show_provider_detail(provider_id)
-            else:
-                self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
-                self._verify_status_lbl.setText(f"✗ {message}")
-        except Exception as e:
-            self._verify_status_lbl.setStyleSheet(f"color:{COLOR_ERROR}; font-size:11px;")
-            self._verify_status_lbl.setText(f"✗ 验证出错: {str(e)}")
-        finally:
+            self._refresh_provider_list()
+            self._show_provider_detail(provider_id)
+
+        self._set_verify_status(("✓ " if success else "✗ ") + str(message), ok=success)
+
+        self._btn_verify_key = getattr(self, "_btn_verify_key", None)
+        if self._btn_verify_key is not None:
             self._btn_verify_key.setEnabled(True)
             self._btn_verify_key.setText("验证")
+        self._verify_worker = None
+
+    def _save_lightai_billing(self):
+        """保存 LightAI 计费身份（仅在该服务商界面存在这些控件时）"""
+        if not getattr(self, "_lightai_user_id", None):
+            return
+        ai_config.set_lightai_billing(
+            self._lightai_user_id.text().strip(),
+            self._lightai_company.currentData(),
+            self._lightai_user_type.currentData(),
+        )
 
     def _verify_google_key(self, api_key):
         try:
@@ -1723,6 +1902,100 @@ class SettingsDialog(QDialog):
             if resp.status_code == 401:
                 return False, "无效的 API Key", {}
             return False, f"API 返回错误: {resp.status_code}", {}
+        except Exception as e:
+            return False, str(e), {}
+
+    def _verify_lightai_key(self, api_key):
+        """验证 LightAI Key
+
+        LightAI 没有 /models 端点，改用「提交一个极简任务」验证：
+        能拿到 task_id 说明 Key 有效且有权限，随后立即按内置模型清单返回。
+        """
+        import requests
+
+        from config import LIGHTAI_IMAGE_GEN_MODELS, LIGHTAI_VISION_MODELS
+        from ui.lightai_client import (
+            DEFAULT_COMPANY,
+            DEFAULT_USER_ID,
+            DEFAULT_USER_TYPE,
+        )
+
+        base_url = ai_config.get_api_base_url("lightai") or "https://lightaiapi.lightspeed.qq.com"
+        base_url = base_url.rstrip("/")
+        # 容错：用户可能把 "Bearer xxx" 整段粘进来，导致拼成 "Bearer Bearer xxx"
+        key = (api_key or "").strip()
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+
+        # 计费身份优先取界面输入，未填则回退内置默认值
+        uid_input = getattr(self, "_lightai_user_id", None)
+        if uid_input is not None:
+            uid = uid_input.text().strip() or DEFAULT_USER_ID
+            company_input = getattr(self, "_lightai_company", None)
+            utype_input = getattr(self, "_lightai_user_type", None)
+            company = (company_input.currentData() if company_input else None) or DEFAULT_COMPANY
+            utype = (utype_input.currentData() if utype_input else None) or DEFAULT_USER_TYPE
+        else:
+            billing = ai_config.get_lightai_billing()
+            uid = billing.get("user_id") or DEFAULT_USER_ID
+            company = billing.get("company") or DEFAULT_COMPANY
+            utype = billing.get("user_type") or DEFAULT_USER_TYPE
+
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            # gemini_app 系列必填计费头，缺失会返回 400
+            "X-User-Id": uid,
+            "X-Company": company,
+            "X-User-Type": utype,
+        }
+        payload = {
+            "model": "gemini-3-flash-preview",
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "generationConfig": {"maxOutputTokens": 16},
+        }
+
+        try:
+            resp = requests.post(
+                f"{base_url}/api/v1/gemini_app/call",
+                headers=headers, json=payload, timeout=20,
+            )
+
+            if resp.status_code in (401, 403):
+                detail = ""
+                try:
+                    detail = (resp.json().get("detail") or "").strip()
+                except Exception:
+                    detail = (resp.text or "")[:200]
+                if resp.status_code == 401:
+                    msg = "无效的 API Key（服务端返回 401）"
+                else:
+                    msg = "Key 有效，但无 gemini_app 服务权限（403）"
+                if detail:
+                    msg = f"{msg}：{detail}"
+                return False, msg, {}
+
+            # 200 / 202 均视为提交成功
+            if resp.status_code in (200, 202):
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
+                if data.get("task_id"):
+                    return True, (
+                        "Key 有效（已成功提交测试任务）"
+                        f"，视觉 {len(LIGHTAI_VISION_MODELS)} 个 / "
+                        f"生图 {len(LIGHTAI_IMAGE_GEN_MODELS)} 个模型可用"
+                    ), {
+                        "vision": list(LIGHTAI_VISION_MODELS),
+                        "image_gen": list(LIGHTAI_IMAGE_GEN_MODELS),
+                    }
+                return False, "服务未返回 task_id，请检查服务地址是否正确", {}
+
+            return False, f"API 返回错误: HTTP {resp.status_code}", {}
+
+        except requests.exceptions.Timeout:
+            return False, "连接超时，请检查网络或是否能访问 lightaiapi.lightspeed.qq.com", {}
         except Exception as e:
             return False, str(e), {}
 
@@ -1921,21 +2194,26 @@ class SettingsDialog(QDialog):
             ai_config.set_api_key(pid, self._provider_key_input.text().strip())
             if hasattr(self, '_provider_base_url'):
                 ai_config.set_api_base_url(pid, self._provider_base_url.text().strip())
+            self._save_lightai_billing()
             if hasattr(self, '_vision_model_combo'):
                 v = self._vision_model_combo.currentData()
                 # 可编辑下拉框：data 为空时取用户输入的文本
                 if not v:
                     v = self._vision_model_combo.currentText().strip()
                 if v:
-                    ai_config.set("vision_model", v)
+                    # 按服务商分别记忆，避免跨服务商串模型
+                    ai_config.set_provider_model_choice(pid, "vision", v)
+                    # 仅当该服务商就是当前默认时，才同步全局字段
+                    if pid == ai_config.get_current_provider_selected():
+                        ai_config.set("vision_model", v)
             if hasattr(self, '_image_gen_model_combo'):
                 v = self._image_gen_model_combo.currentData()
                 if not v:
                     v = self._image_gen_model_combo.currentText().strip()
                 if v:
-                    ai_config.set("image_gen_model", v)
-                    # 同时记录图像生成模型所属的 provider
+                    ai_config.set_provider_model_choice(pid, "image_gen", v)
                     ai_config.set("image_gen_provider", pid)
+                    ai_config.set("image_gen_model", v)
 
         # 快捷键
         seq = self.screenshot_hotkey.keySequence()

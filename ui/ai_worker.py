@@ -55,6 +55,10 @@ class AIWorker(QThread):
             self.error.emit("请先在设置中添加 AI 服务商")
             return
 
+        # 兜底：模型不属于当前服务商时，回退到该服务商的默认模型
+        # （历史配置里存过带前缀的显示名，或切换服务商后遗留了上一个的模型）
+        model_id = self._resolve_model_for_provider(provider_id, model_id, "vision")
+
         if not model_id:
             self.error.emit("模型配置错误，请重新验证 API Key")
             return
@@ -69,8 +73,47 @@ class AIWorker(QThread):
         # 根据服务商使用不同的 SDK
         if provider_id == "google":
             self._run_google_vision(api_key, model_id)
+        elif provider_id == "lightai":
+            self._run_lightai_vision(api_key, base_url, model_id)
         else:
             self._run_openai_compatible_vision(provider_id, api_key, base_url, model_id)
+
+    def _resolve_model_for_provider(self, provider_id, model_id, kind):
+        """校验模型是否属于当前服务商，不属于则回退到其默认模型
+
+        kind: "vision" 或 "image_gen"
+
+        注意：模型 ID 会跨服务商重名（gemini-3-flash-preview 同时属于
+        Google 和 LightAI），所以这里必须用 get_models_for_provider 判断，
+        不能查 AI_MODELS 里的 provider 字段——那只会命中第一条。
+        """
+        allowed = ai_config.get_models_for_provider(provider_id, kind)
+        if not allowed:
+            return model_id
+        if model_id in allowed:
+            return model_id
+
+        fallback = allowed[0]
+        key = "vision_model" if kind == "vision" else "image_gen_model"
+        ai_config.set(key, fallback)
+        return fallback
+
+    def _run_lightai_vision(self, api_key, base_url, model_id):
+        """LightAI 视觉理解（异步提交 + 轮询）"""
+        from ui.lightai_client import LightAIClient, LightAIError, extract_text
+
+        if not self.base64_image:
+            self.error.emit("视觉分析需要图片，请先截图")
+            return
+
+        try:
+            client = LightAIClient.from_config(api_key, base_url or None)
+            text = client.vision_analyze(model_id, self.prompt, self.base64_image)
+            self.finished.emit(text)
+        except LightAIError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"LightAI 请求失败: {str(e)}")
 
 
 
@@ -149,6 +192,9 @@ class AIWorker(QThread):
             self.error.emit("请先在设置中配置图像生成服务商")
             return
 
+        # 兜底：模型不属于当前服务商时，回退到该服务商的默认模型
+        model_id = self._resolve_model_for_provider(provider_id, model_id, "image_gen")
+
         if not model_id:
             self.error.emit("图像生成模型配置错误，请重新验证 API Key")
             return
@@ -161,9 +207,53 @@ class AIWorker(QThread):
         # 根据 provider 类型路由
         if provider_id == "google":
             self._run_google_image_generation(api_key, model_id)
+        elif provider_id == "lightai":
+            base_url = ai_config.get_api_base_url(provider_id)
+            self._run_lightai_image_generation(api_key, base_url, model_id)
         else:
             base_url = ai_config.get_api_base_url(provider_id)
             self._run_openai_compatible_image_generation(api_key, base_url, model_id)
+
+    def _run_lightai_image_generation(self, api_key, base_url, model_id):
+        """LightAI 生图 / 改图（异步提交 + 轮询）"""
+        import os
+        import io
+        import tempfile
+        from datetime import datetime
+
+        from ui.lightai_client import LightAIClient, LightAIError, extract_image
+
+        try:
+            client = LightAIClient.from_config(api_key, base_url or None)
+            result = client.generate_image(
+                model_id, self.prompt, image_base64=self.base64_image
+            )
+
+            kind, payload = extract_image(result)
+
+            temp_dir = os.path.join(tempfile.gettempdir(), "artco_generated")
+            os.makedirs(temp_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            image_path = os.path.join(temp_dir, f"generated_{timestamp}.png")
+
+            if kind == "base64":
+                from PIL import Image
+                img = Image.open(io.BytesIO(base64.b64decode(payload)))
+                img.save(image_path, "PNG")
+            else:
+                import requests
+                from PIL import Image
+                resp = requests.get(payload, timeout=60)
+                resp.raise_for_status()
+                img = Image.open(io.BytesIO(resp.content))
+                img.save(image_path, "PNG")
+
+            self.finished_image.emit(image_path)
+
+        except LightAIError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"LightAI 生图失败: {str(e)}")
 
     def _run_google_image_generation(self, api_key, model_id):
         """使用 Google Gemini SDK 生成图像"""

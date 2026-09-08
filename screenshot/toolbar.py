@@ -1612,7 +1612,6 @@ class NumberAnnotationPanel(QWidget):
         btn_paste.setIcon(qta.icon('mdi6.content-paste', color='#999'))
         btn_paste.setIconSize(QSize(14, 14))
         btn_paste.setFixedSize(24, 20)
-        btn_paste.setToolTip("从剪贴板粘贴图片 (Ctrl+V)")
         btn_paste.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_paste.setStyleSheet("""
             QPushButton { background: transparent; border: none; border-radius: 4px; }
@@ -1625,7 +1624,6 @@ class NumberAnnotationPanel(QWidget):
         btn_file.setIcon(qta.icon('mdi6.image-plus', color='#999'))
         btn_file.setIconSize(QSize(14, 14))
         btn_file.setFixedSize(24, 20)
-        btn_file.setToolTip("选择图片文件")
         btn_file.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_file.setStyleSheet("""
             QPushButton { background: transparent; border: none; border-radius: 4px; }
@@ -1638,7 +1636,6 @@ class NumberAnnotationPanel(QWidget):
         btn_archive.setIcon(qta.icon('mdi6.archive-outline', color='#999'))
         btn_archive.setIconSize(QSize(14, 14))
         btn_archive.setFixedSize(24, 20)
-        btn_archive.setToolTip("从归档记录选择")
         btn_archive.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_archive.setStyleSheet("""
             QPushButton { background: transparent; border: none; border-radius: 4px; }
@@ -1651,7 +1648,6 @@ class NumberAnnotationPanel(QWidget):
         btn_delete.setIcon(qta.icon('mdi6.close-circle-outline', color='#999'))
         btn_delete.setIconSize(QSize(14, 14))
         btn_delete.setFixedSize(24, 20)
-        btn_delete.setToolTip("删除图片")
         btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_delete.setStyleSheet("""
             QPushButton { background: transparent; border: none; border-radius: 4px; }
