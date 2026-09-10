@@ -1230,6 +1230,7 @@ class ScreenshotToolbar(QWidget):
             ('mdi6.text-recognition', "OCR 文字识别", "btn_ocr", self.parent().ocr_screenshot),
             ('mdi6.palette-outline', "在 Photoshop 打开", "btn_ps", self.parent().open_in_photoshop),
             ('mdi6.pin', "屏幕贴图", "btn_pin", self.parent().trigger_pin_action),
+            ('mdi6.checkbox-marked-outline', "生成待办屏贴", "btn_todo", self.parent().trigger_todo_action),
             ('mdi6.inbox-arrow-down', "快速归档", "btn_archive", self.parent().quick_archive),
             ('mdi6.image-edit-outline', "编辑器", "btn_edit", self.parent().open_editor),
             ('mdi6.close', "取消", "btn_close", self.parent().close)

@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTransform
 import qtawesome as qta
 
 from config import ps_config
-from ui.theme import MENU_STYLE
+from ui.theme import MENU_STYLE, SHADOW_MARGIN, shadow_layers
 
 
 class PinWindow(QWidget):
@@ -45,7 +45,7 @@ class PinWindow(QWidget):
         self._drag_start_pos = QPoint()
 
         # 阴影边距
-        self._shadow_margin = 12
+        self._shadow_margin = SHADOW_MARGIN
 
         self._init_window()
         self._update_size()
@@ -87,26 +87,11 @@ class PinWindow(QWidget):
     
     def _get_shadow_params(self, size: int):
         """根据尺寸动态计算阴影参数。
-        返回 (layers, y_offset, max_spread)：
-          - layers: [(spread, alpha), …]  从外到内逐层叠加
-          - y_offset: 阴影整体 Y 偏移（模拟自然光照方向）
-          - max_spread: 最外层扩展像素
+
+        参数取自主题统一规范（ui.theme.shadow_layers），
+        保证与普通屏贴、截图待办板等浮窗视觉一致。
         """
-        scale = min(1.0, max(0.4, size / 200))
-
-        max_spread = int(8 * scale)     # 扩散范围
-        y_offset   = int(2 * scale)     # 轻微向下偏移
-        max_alpha  = int(10 * scale)    # 整体浓度
-        n_layers   = 8
-
-        layers = []
-        for i in range(n_layers):
-            t = i / max(1, n_layers - 1)  # 0(外) → 1(内)
-            spread = int(max_spread * (1.0 - t))
-            alpha = int(max_alpha * (t ** 1.5))  # 指数衰减：外层极淡
-            if alpha > 0:
-                layers.append((spread, alpha))
-        return layers, y_offset, max_spread
+        return shadow_layers(size)
 
     def _draw_shadow(self, painter, img_rect, min_side):
         """绘制平滑多层投影（圆角矩形，模拟自然光）"""

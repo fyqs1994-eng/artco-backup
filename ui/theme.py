@@ -114,6 +114,11 @@ ICON_SM = 14
 ICON_MD = 18
 ICON_LG = 20
 
+# 复选框（待办条目）：图标是视觉尺寸，热区是可点击范围。
+# 热区明显大于图标，保证小图标也好点中；文字条目用热区与行高之差做垂直补偿。
+CHECKBOX_ICON = 18
+CHECKBOX_HIT = 24
+
 # 组件尺寸
 SIDEBAR_WIDTH = 260
 ACTIVITY_BAR_WIDTH = 48
@@ -121,6 +126,60 @@ ACTIVITY_ICON_SIZE = 24
 TOOLBAR_HEIGHT = 52
 BTN_SIZE = 32
 BTN_SIZE_SM = 28
+
+
+# ============================================================
+# 悬浮投影规范（屏贴 / 待办板等浮窗共用）
+# ============================================================
+
+# 投影外扩留白：窗口需留出这么多像素给投影，否则会被裁掉
+SHADOW_MARGIN = 12
+
+# 投影层参数（与尺寸联动，保持视觉一致）
+SHADOW_MAX_SPREAD = 8     # 最外层扩散像素
+SHADOW_Y_OFFSET = 2       # 向下偏移，模拟自然光
+SHADOW_MAX_ALPHA = 10     # 最内层浓度
+SHADOW_LAYERS = 8         # 叠加层数（越多越平滑）
+
+
+def shadow_layers(size: int):
+    """按元素尺寸计算投影分层，返回 [(spread, alpha), ...]（外 → 内）。
+
+    屏贴、截图待办板等所有浮窗统一调用，避免各处各写一套导致
+    投影深浅/扩散不一致。参数由尺寸缩放，小元素自动减弱投影。
+    """
+    scale = min(1.0, max(0.4, size / 200))
+    max_spread = int(SHADOW_MAX_SPREAD * scale)
+    y_offset = int(SHADOW_Y_OFFSET * scale)
+    max_alpha = int(SHADOW_MAX_ALPHA * scale)
+
+    layers = []
+    for i in range(SHADOW_LAYERS):
+        t = i / max(1, SHADOW_LAYERS - 1)   # 0(外) → 1(内)
+        spread = int(max_spread * (1.0 - t))
+        alpha = int(max_alpha * (t ** 1.5))  # 指数衰减：外层极淡
+        if alpha > 0:
+            layers.append((spread, alpha))
+    return layers, y_offset, max_spread
+
+
+def draw_shadow(painter, rect, min_side, radius=RADIUS_LG, y_offset=None):
+    """把统一投影画到 rect 外围（会向外扩画，rect 本身不填充）。
+
+    painter 需已开启 Antialiasing；rect 为内容区（卡片）矩形。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+
+    layers, y_off, _ = shadow_layers(min_side)
+    if y_offset is not None:
+        y_off = y_offset
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    for spread, alpha in layers:
+        r = rect.adjusted(-spread, -spread + y_off, spread, spread + y_off)
+        painter.setBrush(QColor(0, 0, 0, alpha))
+        painter.drawRoundedRect(r, radius, radius)
 
 
 

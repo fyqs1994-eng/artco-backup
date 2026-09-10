@@ -7,6 +7,7 @@
 import sys
 import os
 import json
+import threading
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
@@ -1046,6 +1047,43 @@ class SettingsDialog(QDialog):
 
         lay.addSpacing(_BLOCK_GAP)
 
+        # section: 企业微信待办
+        lay.addWidget(self._section("企业微信待办"))
+        lay.addSpacing(_SEC_GAP)
+
+        lbl_key = QLabel("MCP ApiKey")
+        lbl_key.setStyleSheet(f"color:{_FORM_LABEL}; font-size:12px;")
+        lay.addWidget(lbl_key)
+        lay.addSpacing(4)
+
+        key_row = QHBoxLayout()
+        key_row.setSpacing(8)
+        self.wecom_todo_key_edit = LineEdit()
+        self.wecom_todo_key_edit.setEchoMode(LineEdit.EchoMode.Password)
+        self.wecom_todo_key_edit.setPlaceholderText("粘贴企业微信待办 MCP 的 apikey")
+        self.wecom_todo_key_edit.setFixedHeight(_ROW_H)
+        saved_key = (ai_config.get("wecom_todo") or {}).get("apikey", "")
+        self.wecom_todo_key_edit.setText(saved_key)
+        key_row.addWidget(self.wecom_todo_key_edit, 1)
+
+        self.btn_wecom_test = PushButton("测试")
+        self.btn_wecom_test.setFixedHeight(_ROW_H)
+        self.btn_wecom_test.setFixedWidth(72)
+        self.btn_wecom_test.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_wecom_test.clicked.connect(self._test_wecom_todo)
+        key_row.addWidget(self.btn_wecom_test)
+        lay.addLayout(key_row)
+
+        lay.addSpacing(4)
+        tip_wecom = self._tip(
+            "配置后，待办屏贴可一键同步到企业微信待办。"
+            "密钥仅保存在本机 ai_config.json，不会上传或入库。")
+        tip_wecom.setContentsMargins(24, 0, 0, 0)
+        tip_wecom.setWordWrap(True)
+        lay.addWidget(tip_wecom)
+
+        lay.addSpacing(_BLOCK_GAP)
+
         # section: 关于 / 更新
         lay.addWidget(self._section("关于"))
         lay.addSpacing(_SEC_GAP)
@@ -1905,6 +1943,40 @@ class SettingsDialog(QDialog):
         except Exception as e:
             return False, str(e), {}
 
+    def _test_wecom_todo(self):
+        """测试企业微信待办连通性：创建一条测试待办后立即删除"""
+        key = self.wecom_todo_key_edit.text().strip()
+        if not key:
+            self.btn_wecom_test.setText("未填")
+            QTimer.singleShot(1500, lambda: self.btn_wecom_test.setText("测试"))
+            return
+
+        self.btn_wecom_test.setEnabled(False)
+        self.btn_wecom_test.setText("测试中")
+
+        def _run():
+            try:
+                from ui.wecom_todo import WeComTodoClient
+                client = WeComTodoClient(apikey=key)
+                mapping, err = client.create_todos(
+                    "Artco连通性测试", [{"id": "t", "text": "连通性测试-可忽略"}])
+                if err:
+                    msg = f"失败: {err[:20]}"
+                else:
+                    tid = list(mapping.values())[0]
+                    client.delete_todo(tid)
+                    msg = "可用"
+            except Exception as e:
+                msg = f"失败: {str(e)[:20]}"
+            # 回到主线程更新 UI
+            QTimer.singleShot(0, lambda: self._on_wecom_test_done(msg))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_wecom_test_done(self, msg: str):
+        self.btn_wecom_test.setText(msg)
+        self.btn_wecom_test.setEnabled(True)
+        QTimer.singleShot(2500, lambda: self.btn_wecom_test.setText("测试"))
+
     def _verify_lightai_key(self, api_key):
         """验证 LightAI Key
 
@@ -2214,6 +2286,14 @@ class SettingsDialog(QDialog):
                     ai_config.set_provider_model_choice(pid, "image_gen", v)
                     ai_config.set("image_gen_provider", pid)
                     ai_config.set("image_gen_model", v)
+
+        # 企业微信待办
+        if hasattr(self, 'wecom_todo_key_edit'):
+            key = self.wecom_todo_key_edit.text().strip()
+            prev = ai_config.get("wecom_todo") or {}
+            prev["apikey"] = key
+            prev["enabled"] = bool(key)
+            ai_config.set("wecom_todo", prev)
 
         # 快捷键
         seq = self.screenshot_hotkey.keySequence()

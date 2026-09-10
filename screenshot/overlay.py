@@ -20,6 +20,7 @@ from .utils import parse_hotkey
 from .marks import MarkObject, RectMark, ArrowMark, FreehandMark, TextMark
 from .toolbar import ScreenshotToolbar, ScreenshotAICapsule
 from .pin import PinWindow
+from .todo_pin import TodoPinWindow, get_todo_board
 from .editor import EditorWindow
 from .cache import get_cached_hotkeys, invalidate_hotkey_cache
 
@@ -67,7 +68,49 @@ class ScreenSelectorWindow(QWidget):
         self.setFocus()
         # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
         # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
-    
+        #
+        # Windows 限制：非前台进程调用 activateWindow() 只会让任务栏闪烁，拿不到
+        # 键盘焦点。全局热键触发截图时本进程通常不是前台（焦点还在用户正在用的
+        # 应用上），表现为「首次 Ctrl+C 被原应用吃掉，再按一次才生效」。
+        # 延迟一拍（窗口已创建完成）借用前台线程输入队列再置前，绕开该限制。
+        QTimer.singleShot(0, self._force_foreground)
+
+    def _force_foreground(self):
+        """把窗口真正推到前台并抢到键盘焦点（多屏选择层同样需要）。
+
+        仅靠 activateWindow() 在非前台进程上无效（Windows 只闪任务栏），
+        这里借用 AllowSetForegroundWindow + AttachThreadInput 绕开限制。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            if not hwnd:
+                return
+
+            user32 = ctypes.windll.user32
+            user32.AllowSetForegroundWindow(-1)
+
+            cur_tid = user32.GetCurrentThreadId()
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+            if fg_tid and fg_tid != cur_tid:
+                user32.AttachThreadInput(cur_tid, fg_tid, True)
+
+            try:
+                user32.SetForegroundWindow(wintypes.HWND(hwnd))
+                user32.BringWindowToTop(wintypes.HWND(hwnd))
+            finally:
+                if fg_tid and fg_tid != cur_tid:
+                    user32.AttachThreadInput(cur_tid, fg_tid, False)
+        except Exception:
+            pass
+
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -311,6 +354,12 @@ class ScreenshotOverlay(QWidget):
         self.setFocus()
         # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
         # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
+        #
+        # Windows 限制：非前台进程调用 activateWindow() 只会让任务栏闪烁，拿不到
+        # 键盘焦点。全局热键触发截图时本进程通常不是前台（焦点还在用户正在用的
+        # 应用上），表现为「首次 Ctrl+C 被原应用吃掉，再按一次才生效」。
+        # 延迟一拍（窗口已创建完成）借用前台线程输入队列再置前，绕开该限制。
+        QTimer.singleShot(0, self._force_foreground)
         
         # 注册到活跃实例列表
         self.__class__._active_instances.append(weakref.ref(self))
@@ -319,6 +368,45 @@ class ScreenshotOverlay(QWidget):
         if start_pos is not None:
             QTimer.singleShot(0, self._handle_pending_start_pos)
     
+    def _force_foreground(self):
+        """把遮罩层真正推到前台并抢到键盘焦点。
+
+        仅靠 activateWindow() 在非前台进程上无效（Windows 只闪任务栏），
+        这里借用 AllowSetForegroundWindow + SetForegroundWindow 把置前权限
+        临时放开，再置前 + 聚焦。失败不影响功能，静默降级。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            if not hwnd:
+                return
+
+            user32 = ctypes.windll.user32
+            # 放开置前限制：ASFW_ANY(=-1) 允许任意进程置前
+            user32.AllowSetForegroundWindow(-1)
+
+            # 借用当前前台线程的输入队列，绕开「非前台进程不得抢焦点」
+            cur_tid = user32.GetCurrentThreadId()
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+            if fg_tid and fg_tid != cur_tid:
+                user32.AttachThreadInput(cur_tid, fg_tid, True)
+
+            try:
+                user32.SetForegroundWindow(wintypes.HWND(hwnd))
+                user32.BringWindowToTop(wintypes.HWND(hwnd))
+            finally:
+                if fg_tid and fg_tid != cur_tid:
+                    user32.AttachThreadInput(cur_tid, fg_tid, False)
+        except Exception:
+            pass  # 静默降级：拿不到焦点也不影响鼠标截图
+
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
     def _handle_pending_start_pos(self):
         """处理延迟的起始位置"""
         if self._pending_start_pos is not None:
@@ -1862,6 +1950,36 @@ class ScreenshotOverlay(QWidget):
         # 关闭截图窗口
         self.close()
 
+
+    def trigger_todo_action(self):
+        """把当前截图作为一条待办，追加进统一的待办看板（单例）"""
+        if self.selection_rect.isNull():
+            return
+
+        self._finish_temp_text_editing()  # 先结束文本编辑
+
+        # 获取带标记的截图
+        pixmap = self._get_marked_pixmap()
+        pixmap.setDevicePixelRatio(self.scale_x)
+
+        # 复用已有看板；不存在才创建（创建时即带入这张截图）
+        board = get_todo_board(create=True)
+        if board is None:
+            return
+
+        # 无论新建还是复用，都走同一条追加路径
+        board.add_image_item(pixmap)
+
+        # 新窗口定位到选区旁；已存在则保持原位并置顶
+        if not board.isVisible():
+            tx = self.screen_geometry.x() + self.selection_rect.x()
+            ty = self.screen_geometry.y() + self.selection_rect.y()
+            board.move(tx, ty)
+
+        board.bring_to_front()
+
+        # 关闭截图窗口
+        self.close()
 
     def quick_archive(self):
         if self.selection_rect.isNull():

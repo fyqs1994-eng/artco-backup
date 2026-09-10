@@ -19,6 +19,7 @@ from .toolbar import EditorToolbar, ScreenshotToolbar, ScreenshotAICapsule
 from .editor import EditorWindow
 from .overlay import ScreenshotOverlay, ScreenSelector, ScreenSelectorWindow
 from .pin import PinWindow
+from .todo_pin import TodoPinWindow
 
 __all__ = [
     # Utils
@@ -48,4 +49,6 @@ __all__ = [
     'ScreenSelectorWindow',
     # Pin
     'PinWindow',
+    # Todo Pin
+    'TodoPinWindow',
 ]
