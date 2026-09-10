@@ -1,8 +1,8 @@
 {
-    "version": "1.2.4",
-    "url": "https://github.com/fyqs1994-eng/artco-backup/releases/download/v1.2.4/Artco.exe",
-    "changelog": "LightAI 生图模型扩充：新增 gpt-image-2、即梦 seedream 5.0 pro/lite；修复服务商模型选择串扰、验证按钮无反馈与参数错误；计费身份改为设置项并脱敏",
-    "sha256": "AEEB5D4D85444D30FCCF236C965A76EC5294C5FBF12153D528219A0B97A0257B",
+    "version": "1.2.5",
+    "url": "https://github.com/fyqs1994-eng/artco-backup/releases/download/v1.2.5/Artco.exe",
+    "changelog": "截图待办体验修复与优化\n- 修复截图时首次 Ctrl+C 复制不到当前截图、需再按一次的问题（全局热键触发时强制置前）\n- 待办屏贴投影与普通屏贴视觉统一\n- 修复待办屏贴标题栏下半部分光标变化但无法拖拽的问题\n- 修复待办打勾后图片发虚（分辨率减半）的问题\n- 待办复选框放大至 18px 并与文字/缩略图垂直居中对齐，新增 hover 反馈\n- 新增企业微信待办 MCP 客户端",
+    "sha256": "3A03D162A20087F8BB98E2792484A278BC663A89B9C2A59C0346BF6A252812CC",
     "min_required": "1.0.0",
-    "release_date": "2026-09-08"
+    "release_date": "2026-09-10"
 }
