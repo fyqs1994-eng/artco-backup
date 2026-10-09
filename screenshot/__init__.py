@@ -17,7 +17,8 @@ from .marks import MarkObject, NumberDot, RectMark, ArrowMark, FreehandMark, Tex
 from .canvas import EditorCanvas
 from .toolbar import EditorToolbar, ScreenshotToolbar, ScreenshotAICapsule
 from .editor import EditorWindow
-from .overlay import ScreenshotOverlay, ScreenSelector, ScreenSelectorWindow
+from .overlay import ScreenshotOverlay
+
 from .pin import PinWindow
 from .todo_pin import TodoPinWindow
 
@@ -45,8 +46,6 @@ __all__ = [
     'EditorWindow',
     # Overlay
     'ScreenshotOverlay',
-    'ScreenSelector',
-    'ScreenSelectorWindow',
     # Pin
     'PinWindow',
     # Todo Pin

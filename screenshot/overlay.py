@@ -23,6 +23,8 @@ from .pin import PinWindow
 from .todo_pin import TodoPinWindow, get_todo_board
 from .editor import EditorWindow
 from .cache import get_cached_hotkeys, invalidate_hotkey_cache
+from .window_detect import WindowDetector, enumerate_windows
+from ui.theme import ACCENT_PRIMARY
 
 
 def _overlay_caret_geometry(
@@ -42,208 +44,10 @@ def _overlay_caret_geometry(
     return x, y_top, line_height
 
 
-class ScreenSelectorWindow(QWidget):
-    """单个屏幕的选择器窗口"""
-    screen_selected = Signal(object)  # 改名，表示屏幕被选中（悬停或拖动）
-    drag_started = Signal(object, object)  # (screen, start_pos)
-    
-    def __init__(self, screen):
-        super().__init__()
-        self.screen = screen
-        self.is_hovered = False
-        self._press_pos = None
-        self._dragged = False
-        self._font = QFont(FONT_NAME, 16, QFont.Weight.Bold)
-        
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setCursor(Qt.CursorShape.CrossCursor)  # 改为十字光标，表示可以直接拖动
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        
-        self.setGeometry(screen.geometry())
-        self.show()
-        self.activateWindow()
-        self.setFocus()
-        # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
-        # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
-        #
-        # Windows 限制：非前台进程调用 activateWindow() 只会让任务栏闪烁，拿不到
-        # 键盘焦点。全局热键触发截图时本进程通常不是前台（焦点还在用户正在用的
-        # 应用上），表现为「首次 Ctrl+C 被原应用吃掉，再按一次才生效」。
-        # 延迟一拍（窗口已创建完成）借用前台线程输入队列再置前，绕开该限制。
-        QTimer.singleShot(0, self._force_foreground)
-
-    def _force_foreground(self):
-        """把窗口真正推到前台并抢到键盘焦点（多屏选择层同样需要）。
-
-        仅靠 activateWindow() 在非前台进程上无效（Windows 只闪任务栏），
-        这里借用 AllowSetForegroundWindow + AttachThreadInput 绕开限制。
-        """
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            hwnd = int(self.winId())
-            if not hwnd:
-                return
-
-            user32 = ctypes.windll.user32
-            user32.AllowSetForegroundWindow(-1)
-
-            cur_tid = user32.GetCurrentThreadId()
-            fg_hwnd = user32.GetForegroundWindow()
-            fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
-            if fg_tid and fg_tid != cur_tid:
-                user32.AttachThreadInput(cur_tid, fg_tid, True)
-
-            try:
-                user32.SetForegroundWindow(wintypes.HWND(hwnd))
-                user32.BringWindowToTop(wintypes.HWND(hwnd))
-            finally:
-                if fg_tid and fg_tid != cur_tid:
-                    user32.AttachThreadInput(cur_tid, fg_tid, False)
-        except Exception:
-            pass
-
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # 悬停时更明显的高亮效果
-        if self.is_hovered:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 50))  # 更浅的遮罩
-            border_width = 4
-            border_color = QColor(0, 120, 215)
-        else:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 120))  # 较深的遮罩
-            border_width = 2
-            border_color = QColor(100, 100, 100, 150)
-        
-        painter.setPen(QPen(border_color, border_width))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        margin = border_width // 2
-        painter.drawRect(self.rect().adjusted(margin, margin, -margin, -margin))
-        
-        # 显示提示文字
-        painter.setPen(QColor(255, 255, 255))
-        painter.setFont(self._font)
-        if self.is_hovered:
-            text = "按住拖动开始截图"
-        else:
-            text = f"屏幕 {self.screen.name()}"
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, text)
-    
-    def enterEvent(self, event):
-        self.is_hovered = True
-        self.screen_selected.emit(self.screen)  # 悬停时发送屏幕选择信号
-        self.activateWindow()
-        self.setFocus()
-        self.update()
-    
-    def leaveEvent(self, event):
-        self.is_hovered = False
-        self.update()
-    
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._press_pos = event.pos()
-            self._dragged = False
-        elif event.button() == Qt.MouseButton.RightButton:
-            event.accept()
-            self.drag_started.emit(None, None)  # 取消
-
-    def mouseMoveEvent(self, event):
-        if self._press_pos is not None:
-            delta = event.pos() - self._press_pos
-            if delta.manhattanLength() > 4:  # 超过 4px 视为拖动
-                self._dragged = True
-                global_pos = self.mapToGlobal(self._press_pos)
-                self._press_pos = None
-                self.drag_started.emit(self.screen, global_pos)
-                # emit 同步关闭本窗口（WA_DeleteOnClose），勿再 hide
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._press_pos is not None:
-            if not self._dragged:
-                # 单击：选择屏幕，不带起始位置，overlay 从头开始
-                self._press_pos = None
-                self.drag_started.emit(self.screen, None)
-                # 同上
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            event.accept()  # 消费事件，防止穿透到底层窗口
-            # 延迟发射取消信号，确保 keyRelease 仍由本窗口消费
-            QTimer.singleShot(0, lambda: self.drag_started.emit(None, None))
-
-
-class ScreenSelector(QWidget):
-    """屏幕选择器管理器"""
-    screen_selected = Signal(object)
-    
-    def __init__(self, parent_widget):
-        super().__init__()
-        self.parent_widget = parent_widget
-        self.windows = []
-        self.current_screen = None
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        
-        screens = QGuiApplication.screens()
-        
-        for screen in screens:
-            win = ScreenSelectorWindow(screen)
-            win.screen_selected.connect(self._on_screen_hovered)
-            win.drag_started.connect(self._on_drag_started)
-            self.windows.append(win)
-    
-    def _on_screen_hovered(self, screen):
-        """屏幕悬停时的处理"""
-        self.current_screen = screen
-        # 可以在这里添加额外的视觉反馈
-    
-    def _on_drag_started(self, screen, start_pos):
-        """拖动开始：先关掉所有选择器窗口再抓屏，避免把提示文字/蓝框拍进截图。"""
-        for win in self.windows:
-            try:
-                win.screen_selected.disconnect()
-            except TypeError:
-                pass
-            try:
-                win.drag_started.disconnect()
-            except TypeError:
-                pass
-            win.close()
-        self.windows.clear()
-
-        if screen is None:
-            self.screen_selected.emit(None)
-            self.close()
-            return
-
-        QApplication.processEvents()
-
-        clean_pixmap = None
-        try:
-            clean_pixmap = screen.grabWindow(0)
-            if clean_pixmap is not None and not clean_pixmap.isNull():
-                clean_pixmap.setDevicePixelRatio(1.0)
-        except Exception:
-            clean_pixmap = None
-
-        self.screen_selected.emit((screen, start_pos, clean_pixmap))
-        self.close()
-
-
 class ScreenshotOverlay(QWidget):
     _active_instances = []  # 追踪活跃实例（弱引用），用于 prompt 变更时刷新快捷按钮
 
-    def __init__(self, target_screen=None, start_pos=None, prefetched_pixmap=None):
+    def __init__(self, target_screen=None, start_pos=None, prefetched_pixmap=None, activate=True):
         super().__init__()
         
         if target_screen is None:
@@ -254,6 +58,8 @@ class ScreenshotOverlay(QWidget):
         
         self.target_screen = target_screen
         self.screen_geometry = target_screen.geometry()
+        # 多屏时由 main 注入同组遮罩的弱引用列表（每屏一个遮罩，窗口不跨屏）
+        self._group = None
         
         # 在显示窗口之前先截图，避免截取到自己的窗口
         self.full_screen_pixmap = None
@@ -344,14 +150,40 @@ class ScreenshotOverlay(QWidget):
         self._ratio_fade_timer.setInterval(16)  # ~60fps
         self._ratio_fade_timer.timeout.connect(self._do_fade_ratio_hint)
 
+        # 先绑定目标屏再设几何，窗口按该屏 DPI 创建，避免先在主屏创建再跨屏缩放
+        self.setScreen(self.target_screen)
         self.setGeometry(self.screen_geometry)
+
+        # 窗口识别：必须在 show() 之前拍快照，并排除已显示的其它屏遮罩
+        self._window_detector = None
+        self._hover_rect = None
+        self._press_hover_rect = None
+        try:
+            own = []
+            for ref in self.__class__._active_instances:
+                ov = ref()
+                if ov is not None:
+                    try:
+                        own.append(int(ov.winId()))
+                    except RuntimeError:
+                        pass
+            self._window_detector = WindowDetector(self.target_screen, enumerate_windows(own))
+            if start_pos is None:
+                local = QCursor.pos() - self.screen_geometry.topLeft()
+                if self.rect().contains(local):
+                    self._hover_rect = self._window_detector.detect(local)
+        except Exception:
+            self._window_detector = None
         
         # 如果有起始位置，记录下来，在窗口显示后再处理
         self._pending_start_pos = start_pos
         
         self.show()
-        self.activateWindow()
-        self.setFocus()
+        # 多屏时只激活光标所在屏的遮罩：激活会切换焦点和输入法上下文，偶发阻塞数百毫秒，
+        # 每多激活一次就多一次风险。其它屏在鼠标移入时由 enterEvent 再接管焦点
+        if activate:
+            self.activateWindow()
+            self.setFocus()
         # 不使用 grabKeyboard()——它会阻止 Windows IME 切换输入法
         # 遮罩层是全屏置顶 + StrongFocus，天然能接收键盘事件
         #
@@ -359,7 +191,8 @@ class ScreenshotOverlay(QWidget):
         # 键盘焦点。全局热键触发截图时本进程通常不是前台（焦点还在用户正在用的
         # 应用上），表现为「首次 Ctrl+C 被原应用吃掉，再按一次才生效」。
         # 延迟一拍（窗口已创建完成）借用前台线程输入队列再置前，绕开该限制。
-        QTimer.singleShot(0, self._force_foreground)
+        if activate:
+            QTimer.singleShot(0, self._force_foreground)
         
         # 注册到活跃实例列表
         self.__class__._active_instances.append(weakref.ref(self))
@@ -419,6 +252,28 @@ class ScreenshotOverlay(QWidget):
             self.selection_rect = QRect(local_pos, QSize(0, 0))
             self.update_handles()
             self.grabMouse()
+
+    def resume_early_press(self, press_local, end_local, still_pressed):
+        """接上「热键按下后、遮罩出现前」用户已经开始的框选。
+
+        抓屏 + 建窗约 150ms，这期间的左键按下由 main 的临时钩子吞掉并记下位置。
+        坐标均为本屏逻辑局部坐标 (x, y)。still_pressed=True 时左键仍按着：
+        抓住鼠标，后续移动、松手照常走 mouseMoveEvent / mouseReleaseEvent。
+        """
+        self._clear_siblings_selection()
+        self.start_pos = QPoint(*press_local)
+        x1, x2 = sorted((press_local[0], end_local[0]))
+        y1, y2 = sorted((press_local[1], end_local[1]))
+        self.selection_rect = QRect(x1, y1, x2 - x1, y2 - y1).intersected(self.rect())
+        if still_pressed:
+            self.is_selecting = True
+            self.grabMouse()
+        elif self.selection_rect.width() <= 5 or self.selection_rect.height() <= 5:
+            self.selection_rect = QRect()  # 只是点了一下，不算选区
+        self.update_handles()
+        if not still_pressed and not self.selection_rect.isNull():
+            self.update_toolbar_pos()
+        self.update()
     
     def _ensure_toolbar(self):
         """懒加载工具栏"""
@@ -432,6 +287,7 @@ class ScreenshotOverlay(QWidget):
 
     def closeEvent(self, event):
         """关闭事件 - 确保资源正确释放"""
+        self._close_siblings()
         # 停止临时文本编辑定时器
         if hasattr(self, '_temp_text_cursor_timer') and self._temp_text_cursor_timer.isActive():
             self._temp_text_cursor_timer.stop()
@@ -441,6 +297,12 @@ class ScreenshotOverlay(QWidget):
             self.releaseMouse()
         except:
             pass
+        
+        # 释放整屏位图：这两块是全屏级内存（物理分辨率 ×4 字节），
+        # 不显式置空会随实例残留，导致频繁截图后内存持续累积不归还。
+        # 置空前保存引用计数无关紧要，paintEvent 已对 None 做保护。
+        self.full_screen_pixmap = None
+        self._dimmed_background = None
         
         event.accept()
 
@@ -462,7 +324,8 @@ class ScreenshotOverlay(QWidget):
     def _capture_screenshot(self):
         """在窗口显示之前截取屏幕"""
         try:
-            self.full_screen_pixmap = self.target_screen.grabWindow(0)
+            from .capture import grab_screens
+            self.full_screen_pixmap = grab_screens([self.target_screen])[0]
             self.full_screen_pixmap.setDevicePixelRatio(1.0)
             
             self.scale_x = self.full_screen_pixmap.width() / self.screen_geometry.width()
@@ -480,14 +343,18 @@ class ScreenshotOverlay(QWidget):
             self.scale_y = 1.0
 
     def _get_dimmed_background(self):
-        """懒加载暗化背景"""
-        if self._dimmed_background is None:
-            self._dimmed_background = QPixmap(self.screen_geometry.size())
-            painter = QPainter(self._dimmed_background)
-            painter.drawPixmap(self._dimmed_background.rect(), self.full_screen_pixmap)
-            painter.fillRect(self._dimmed_background.rect(), QColor(0, 0, 0, 120))
-            painter.end()
-        return self._dimmed_background
+        """返回用于暗化的底图（即抓屏原图本身）。
+
+        原先这里会 new 一块与屏幕等大的 QPixmap，把抓屏原图整张画进去再压暗，
+        等于同一时刻内存里多存一整屏数据。现已改为不构造副本，暗化交给
+        paintEvent 的 fillRect 半透明黑叠加，视觉结果一致。
+
+        重要：本方法返回的是物理像素尺寸的原图，不是屏幕逻辑尺寸。调用方
+        绘制时必须显式指定目标矩形（如 self.rect()）与源矩形，不能写成
+        drawPixmap(0, 0, pixmap)，否则物理尺寸的图会被按像素原样铺开，
+        导致画面放大。
+        """
+        return self.full_screen_pixmap
 
     def _get_scaled_source_rect(self):
         """计算源矩形（物理像素坐标）"""
@@ -1004,8 +871,19 @@ class ScreenshotOverlay(QWidget):
             painter.fillRect(self.rect(), QColor(0, 0, 0, 120))
             return
         
-        # 1. 绘制完整的暗色背景图（懒加载）
-        painter.drawPixmap(0, 0, self._get_dimmed_background())
+        # 1. 绘制完整的暗色背景图
+        # 先画抓屏原图，再叠一层半透明黑实现暗化（原先是在整屏副本里完成暗化，
+        # 现在直接在目标画布上叠加，省掉一整块全屏副本的内存）。
+        #
+        # 注意：这里必须显式给定目标矩形 self.rect()（逻辑尺寸），不能写成
+        # drawPixmap(0, 0, pixmap)。原实现在 _get_dimmed_background 内部用
+        # QPixmap(screen_geometry.size()) 构造副本时，顺带把物理像素的原图
+        # 缩放成了屏幕逻辑尺寸；去掉那一步后，若仍按 (0,0) 贴图，Qt 会按像素
+        # 原样铺开物理尺寸的图，导致窗口外部画面被放大（选区因显式给了源/目标
+        # 矩形而看起来正常）。
+        painter.drawPixmap(self.rect(), self.full_screen_pixmap,
+                           self.full_screen_pixmap.rect())
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 120))
         
         # 归档动画模式 - 飞向图标效果
         if getattr(self, '_archive_animating', False):
@@ -1044,6 +922,19 @@ class ScreenshotOverlay(QWidget):
                     painter.drawPixmap(current_rect, self.full_screen_pixmap, source_rect)
                     painter.restore()
             return
+
+        # 无有效选区时：高亮光标所在窗口（单击即选中）
+        hover = self._hover_rect
+        if hover is not None and (self.selection_rect.width() <= 5
+                                  or self.selection_rect.height() <= 5):
+            painter.save()
+            painter.setClipRect(hover)
+            painter.drawPixmap(self.rect(), self.full_screen_pixmap,
+                               self.full_screen_pixmap.rect())
+            painter.restore()
+            painter.setPen(QPen(QColor(ACCENT_PRIMARY), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(hover.adjusted(1, 1, -1, -1))
 
         # 2. 如果有选区，使用剪切区域绘制原图
         if not self.selection_rect.isNull() and self.selection_rect.width() > 0 and self.selection_rect.height() > 0:
@@ -1124,6 +1015,94 @@ class ScreenshotOverlay(QWidget):
                 painter.drawText(bx + pad_x, by + pad_y + fm.ascent(), label)
                 painter.restore()
 
+    # ── 多屏同组遮罩协同 ──────────────────────────────────
+
+    def _siblings(self):
+        for ref in self._group or ():
+            sib = ref()
+            if sib is not None and sib is not self:
+                yield sib
+
+    def _close_siblings(self):
+        """任一屏遮罩关闭时，同组其它屏一起关闭。"""
+        sibs = list(self._siblings())
+        self._group = None
+        for sib in sibs:
+            sib._group = None
+            try:
+                sib.close()
+            except RuntimeError:
+                pass
+
+    def _clear_siblings_selection(self):
+        """在本屏开始新选区时，清掉其它屏的选区（同一时刻只有一个选区）。"""
+        for sib in self._siblings():
+            try:
+                sib._reset_selection()
+            except RuntimeError:
+                pass
+
+    def _reset_selection(self):
+        if self._temp_text_editing:
+            self._abort_temp_text_editing()
+        self._temp_reedit_original = None
+        self._is_marking = False
+        self.is_selecting = self.is_moving = self.is_resizing = False
+        self.resize_handle = None
+        self._marks.clear()
+        self._redo_stack.clear()
+        if self._mark_tool != 'none':
+            self._mark_tool = 'none'
+            if self.toolbar:
+                self.toolbar.set_mark_tool('none')
+        self._unlock_aspect_ratio()
+        self.selection_rect = QRect()
+        self.update_handles()
+        self._hide_toolbar_and_capsule()
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._update_hover(self._cursor_local_pos())
+        self.update()
+
+    def _sibling_busy(self) -> bool:
+        for sib in self._siblings():
+            try:
+                if not sib.selection_rect.isNull() or sib._temp_text_editing:
+                    return True
+            except RuntimeError:
+                pass
+        return False
+
+    def _update_hover(self, pos):
+        """无选区（含其它屏）且未选标记工具时，按光标位置更新窗口高亮。"""
+        new = None
+        if (self._window_detector is not None and pos is not None
+                and self.selection_rect.isNull() and self._mark_tool == 'none'
+                and not self._sibling_busy()):
+            new = self._window_detector.detect(pos)
+        old = self._hover_rect
+        if (old is None) != (new is None) or (old is not None and old != new):
+            self._hover_rect = new
+            self.update()
+
+    def _cursor_local_pos(self):
+        """光标在本屏的局部坐标；不在本屏返回 None。"""
+        local = QCursor.pos() - self.screen_geometry.topLeft()
+        return local if self.rect().contains(local) else None
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if self._hover_rect is not None:
+            self._hover_rect = None
+            self.update()
+
+    def enterEvent(self, event):
+        # 多屏：鼠标进入哪块屏，键盘焦点就跟到哪块屏；
+        # 但别的屏已有选区/正在输入文字时不抢，保证 Ctrl+C、Esc 等仍作用于那块选区
+        super().enterEvent(event)
+        if self._group and (not self.selection_rect.isNull() or not self._sibling_busy()):
+            self.activateWindow()
+            self.setFocus()
+
     def _get_int_pos(self, event) -> QPoint:
         """获取强制取整的鼠标位置"""
         return QPoint(int(event.position().x()), int(event.position().y()))
@@ -1135,6 +1114,11 @@ class ScreenshotOverlay(QWidget):
                 self._mark_tool = 'none'
                 self.toolbar.set_mark_tool('none')
                 self.setCursor(Qt.CursorShape.CrossCursor)
+                return
+            # 有选区（本屏或其它屏）时，右键先清选区；无选区时才退出截图
+            if not self.selection_rect.isNull() or self._sibling_busy():
+                self._clear_siblings_selection()
+                self._reset_selection()
                 return
             self.close()
             return
@@ -1198,7 +1182,14 @@ class ScreenshotOverlay(QWidget):
         else:
             self._hide_toolbar_and_capsule()
             self._unlock_aspect_ratio()
+            self._clear_siblings_selection()
             
+            override = getattr(self, '_press_origin_override', None)
+            if override is not None:
+                # main 补发的按下：起点用用户真正按下时的位置，而不是补发时光标已拖到的位置
+                self._press_origin_override = None
+                pos = QPoint(*override)
+            self._press_hover_rect = self._hover_rect
             self.is_selecting = True
             self.start_pos = pos
             self.selection_rect = QRect(pos, QSize(0, 0))
@@ -1233,11 +1224,15 @@ class ScreenshotOverlay(QWidget):
             x2, y2 = pos.x(), pos.y()
             if x1 > x2: x1, x2 = x2, x1
             if y1 > y2: y1, y2 = y2, y1
-            self.selection_rect = QRect(x1, y1, x2 - x1, y2 - y1)
+            # 限制在本屏内：越界部分没有截图内容，导出会变黑
+            self.selection_rect = QRect(x1, y1, x2 - x1, y2 - y1).intersected(self.rect())
             self._hide_toolbar_and_capsule()
         elif self.is_moving:
             delta = pos - self.drag_start_pos
-            self.selection_rect.translate(delta)
+            r = self.selection_rect.translated(delta)
+            r.moveLeft(max(0, min(r.left(), self.width() - r.width())))
+            r.moveTop(max(0, min(r.top(), self.height() - r.height())))
+            self.selection_rect = r
             self.drag_start_pos = pos
             self._hide_toolbar_and_capsule()
         elif self.is_resizing:
@@ -1297,10 +1292,11 @@ class ScreenshotOverlay(QWidget):
                     else:
                         x2 = x + new_w
             
-            self.selection_rect = QRect(x, y, x2 - x, y2 - y)
+            self.selection_rect = QRect(x, y, x2 - x, y2 - y).intersected(self.rect())
             self._hide_toolbar_and_capsule()
         else:
-            # 没有拖动操作时，更新鼠标光标
+            # 没有拖动操作时，更新窗口高亮和鼠标光标
+            self._update_hover(pos)
             self._update_cursor_for_position(pos)
             
             return
@@ -1548,6 +1544,16 @@ class ScreenshotOverlay(QWidget):
         if hasattr(self, 'start_pos') and self.is_selecting:
             self.releaseMouse()
         
+        if self.is_selecting and self._press_hover_rect is not None and (
+                self.selection_rect.width() <= 5 or self.selection_rect.height() <= 5):
+            # 单击（没拖出选区）：选中按下时高亮的窗口
+            self.selection_rect = QRect(self._press_hover_rect)
+            self.update_handles()
+            self.update()
+        self._press_hover_rect = None
+        if not self.selection_rect.isNull():
+            self._hover_rect = None
+
         self.is_selecting = False
         self.is_moving = False
         self.is_resizing = False

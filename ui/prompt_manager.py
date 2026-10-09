@@ -40,7 +40,7 @@ class PromptManagementPanel(QWidget):
 
     def init_ui(self):
         os.environ.setdefault("QT_API", "pyside6")
-        from qfluentwidgets import PushButton, PrimaryPushButton, LineEdit, TextEdit, RadioButton, CheckBox
+        from ui.fluent_controls import PushButton, PrimaryPushButton, LineEdit, TextEdit, RadioButton, CheckBox
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

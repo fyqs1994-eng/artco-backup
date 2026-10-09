@@ -41,8 +41,6 @@ hiddenimports = [
     'PySide6.QtSvg',
     'PySide6.QtSvgWidgets',
     'qtawesome',
-    'qfluentwidgets',
-    'qfluentwidgets.icons',
     # AI 依赖
     'google.genai',
     # WinRT OCR
@@ -77,6 +75,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=['rthook_qt_api.py'],
     excludes=[
+        'qfluentwidgets',  # replaced by ui/fluent_controls.py (saves ~800MB commit)
         # 以下大包项目代码未使用，但环境中已安装，必须排除以防 exe 膨胀
         'torch',           # ~750MB，AI 训练框架，项目未使用
         'torchvision',     # ~50MB，torch 配套，项目未使用

@@ -22,29 +22,13 @@ from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer, QThread
 from PySide6.QtGui import QKeySequence, QColor
 import qtawesome as qta
 
-# ── qfluentwidgets 集中安全导入 ──
-# 该库在模块级执行 print(ALERT)，若进程无控制台句柄（pythonw / 无窗口启动）
-# 会抛 OSError(WinError 6)，导致设置面板完全无法创建。
-# 这里集中导入一次，失败则整体降级为 PySide6 原生控件。
-_QF_AVAILABLE = False
-try:
-    from qfluentwidgets import (
-        PushButton, PrimaryPushButton, LineEdit, TextEdit,
-        RadioButton, CheckBox, ComboBox, EditableComboBox,
-    )
-    _QF_AVAILABLE = True
-except Exception:
-    # 降级：用原生控件替代，保证设置面板始终可用
-    PushButton = QPushButton
-    PrimaryPushButton = QPushButton
-    LineEdit = QLineEdit
-    TextEdit = QTextEdit          # 必须是 QTextEdit（需支持 setPlainText）
-    RadioButton = QRadioButton
-    CheckBox = QCheckBox
-    ComboBox = QComboBox
-    EditableComboBox = QComboBox
+# ── 表单控件：本地复刻的 Fluent 风格控件（已移除 qfluentwidgets 依赖，见 ui/fluent_controls.py）──
+from ui.fluent_controls import (
+    PushButton, PrimaryPushButton, LineEdit, TextEdit,
+    RadioButton, CheckBox, ComboBox, EditableComboBox,
+)
 
-from config import AI_MODELS, ai_config, model_classifier, wecom_config, ps_config, appearance_config, PRESET_SCHEMES
+from config import AI_MODELS, ai_config, model_classifier, ps_config, appearance_config, PRESET_SCHEMES
 from utils import hotkey_manager
 from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
@@ -382,9 +366,7 @@ class SettingsDialog(QDialog):
     # ══════════════════════════════════════════════════════
 
     def init_ui(self):
-        # 说明：qfluentwidgets 已在模块顶部集中安全导入（见文件头），
-        # 此处直接使用模块级 PushButton / PrimaryPushButton，
-        # 避免在函数内重复导入触发无控制台时的 OSError(WinError 6)。
+        # 说明：表单控件在模块顶部从 ui.fluent_controls 导入（见文件头）。
         os.environ.setdefault("QT_API", "pyside6")
 
         root = QVBoxLayout(self)
@@ -467,7 +449,7 @@ class SettingsDialog(QDialog):
             b.setChecked(i == idx)
 
     def show_tab(self, tab_id: str):
-        mapping = {'ai': 0, 'prompt': 1, 'hotkey': 2, 'appearance': 3, 'general': 4, 'wecom': 0}
+        mapping = {'ai': 0, 'prompt': 1, 'hotkey': 2, 'appearance': 3, 'general': 4}
         self._switch_tab(mapping.get(tab_id, 0))
 
     # ══════════════════════════════════════════════════════
@@ -2482,74 +2464,6 @@ class SettingsDialog(QDialog):
         if hasattr(self, '_update_progress'):
             self._update_progress.close()
         QMessageBox.warning(self, "更新失败", f"下载失败：\n{err}")
-
-    # ══════════════════════════════════════════════════════
-    #  Webhook（保留接口）
-    # ══════════════════════════════════════════════════════
-
-    def _load_webhooks(self):
-        if not hasattr(self, 'webhook_list_layout'):
-            return
-        while self.webhook_list_layout.count():
-            item = self.webhook_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        webhooks = wecom_config.get_webhooks()
-        if not webhooks:
-            el = QLabel("暂无配置，请添加企微群 Webhook")
-            el.setStyleSheet("color:#888;padding:20px;font-size:12px;")
-            el.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.webhook_list_layout.addWidget(el)
-            return
-        for wh in webhooks:
-            row = QWidget()
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(4, 4, 4, 4)
-            rl.setSpacing(8)
-            nl = QLabel(wh["name"])
-            nl.setFixedWidth(120)
-            nl.setStyleSheet("font-weight:bold;")
-            rl.addWidget(nl)
-            url = wh["url"]
-            disp = url[:30] + "..." + url[-15:] if len(url) > 50 else url
-            ul = QLabel(disp)
-            ul.setStyleSheet("color:#666;font-size:11px;")
-            ul.setToolTip(url)
-            rl.addWidget(ul, 1)
-            bd = QPushButton("删除")
-            bd.setFixedWidth(50)
-            bd.setProperty("webhook_name", wh["name"])
-            bd.clicked.connect(self._remove_webhook)
-            rl.addWidget(bd)
-            self.webhook_list_layout.addWidget(row)
-
-    def _add_webhook(self):
-        name = self.webhook_name_input.text().strip()
-        url = self.webhook_url_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, "提示", "请输入群名称")
-            return
-        if not url:
-            QMessageBox.warning(self, "提示", "请输入 Webhook URL")
-            return
-        if not url.startswith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send"):
-            QMessageBox.warning(self, "提示", "Webhook URL 格式不正确\n应以 https://qyapi.weixin.qq.com/cgi-bin/webhook/send 开头")
-            return
-        wecom_config.add_webhook(name, url)
-        self.webhook_name_input.clear()
-        self.webhook_url_input.clear()
-        self._load_webhooks()
-        QMessageBox.information(self, "成功", f"已添加 Webhook：{name}")
-
-    def _remove_webhook(self):
-        btn = self.sender()
-        name = btn.property("webhook_name")
-        if QMessageBox.question(
-            self, "确认", f'确定要删除 "{name}" 吗？',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes:
-            wecom_config.remove_webhook(name)
-            self._load_webhooks()
 
     # ══════════════════════════════════════════════════════
     #  全局 QSS

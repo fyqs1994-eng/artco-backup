@@ -6,6 +6,5 @@ psd-tools
 python-dotenv
 winsdk
 requests
-git+https://github.com/zhiyiYo/PyQt-Fluent-Widgets.git@PySide6
 
 

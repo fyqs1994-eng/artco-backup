@@ -8,11 +8,13 @@ import os
 import base64
 import threading
 import ctypes
+import weakref
+
 
 # ── 启动加固：保证 stdout/stderr 永远可写 ──
-# 关键：必须在本文件任何 import（尤其 ui.settings → qfluentwidgets）之前执行。
-# qfluentwidgets 在模块级执行 print(ALERT)；而下方 FreeConsole() 会释放控制台，
-# 使 stdout 句柄失效，print 抛 OSError(WinError 6)，导致设置面板无法构造。
+# 关键：必须在本文件任何 import 之前执行。
+# 下方 FreeConsole() 会释放控制台，使 stdout 句柄失效，任何 print 都会抛 OSError(WinError 6)。
+# （历史上由 qfluentwidgets 模块级 print 触发，该依赖已移除，保留作通用兜底。）
 # 这里先把 stdout/stderr 换成"永远不抛异常"的安全流。
 _ARTCO_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'artco_error.log')
 
@@ -82,7 +84,7 @@ from PySide6.QtCore import (
     QBuffer, QIODevice, QRectF
 )
 
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap, QPainter, QPen, QPainterPath, QConicalGradient, QBrush
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap, QPainter, QPen, QPainterPath, QConicalGradient, QBrush, QCursor
 
 
 from version import APP_VERSION, APP_NAME
@@ -96,7 +98,8 @@ from ui import (
     AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, WorkbenchWindow,
     ClipboardHistoryManager, ClipboardFloatPanel, GenCanvas
 )
-from screenshot import ScreenshotOverlay, ScreenSelector, PinWindow
+from screenshot import ScreenshotOverlay, PinWindow
+from screenshot.capture import grab_screens, physical_to_local, physical_to_screen_local
 
 
 def get_app_icon():
@@ -856,6 +859,19 @@ class CapsuleWidget(QWidget):
                 pass
             self._hotkey_hook = None
 
+    def _pause_side_hook(self):
+        """截图期间摘掉侧键钩子：它是 Python 写的全局鼠标钩子，系统每次鼠标移动都要
+        等它拿到 GIL 才能往下走，而建遮罩、重绘 4K 画面时主线程一直占着 GIL。
+        实测按 F1 后光标最长停顿约 35ms，摘掉后约 5ms。截图时用不到侧键。"""
+        if getattr(self, '_clipboard_mouse_hook', None):
+            self._unhook_clipboard_mouse_hook()
+            self._side_hook_paused = True
+
+    def _resume_side_hook(self):
+        if getattr(self, '_side_hook_paused', False):
+            self._side_hook_paused = False
+            self._setup_clipboard_float_hotkey()
+
     def _unhook_clipboard_mouse_hook(self):
         """卸载剪贴板浮窗鼠标钩子"""
         try:
@@ -1145,6 +1161,8 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             active_popup.close()
             active_popup = QApplication.activePopupWidget()
         
+        self._pause_side_hook()
+        self._arm_early_press_catcher()
         self._saved_pos = self.pos()
         self.hide()
         
@@ -1153,37 +1171,239 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         
         screens = QGuiApplication.screens()
         if len(screens) > 1:
-            self.screen_selector = ScreenSelector(self)
-            self.screen_selector.screen_selected.connect(self._on_screen_selected)
+            # 每块屏各开一个遮罩，不再弹「选择屏幕」层
+            QTimer.singleShot(0, self._start_multi_screen_screenshot)
         else:
             # 单屏直接启动截图，processEvents 已确保窗口隐藏
             QTimer.singleShot(0, lambda: self._start_screenshot_on_screen(None))
     
-    def _on_screen_selected(self, data):
-        if data is None or (isinstance(data, tuple) and data[0] is None):
+    def _start_multi_screen_screenshot(self):
+        """多屏：每块屏一个独立遮罩窗口，窗口永不跨屏。
+
+        不能用一个大窗口横跨多屏：Qt 在 PassThrough 下屏幕逻辑坐标之间有空洞
+        （如两块 150% 的 4K 屏，屏1 为 0~2560、屏2 从 3840 起），落在空洞里的
+        部分会黑屏；跨屏窗口还会在不同 DPI 间来回切换，导致窗口缩放、分辨率跳变。
+        """
+        if getattr(self, 'overlay', None) is not None:
+            try:
+                if self.overlay.isVisible():
+                    self._take_early_press()
+                    return
+            except RuntimeError:
+                self.overlay = None
+
+        # 先把所有屏抓完再显示任何遮罩，避免把前一个遮罩拍进下一块屏
+        screens = QGuiApplication.screens()
+        try:
+            pixmaps = grab_screens(screens)
+        except Exception:
+            pixmaps = [None] * len(screens)
+        # 建遮罩前先卸掉临时左键钩子：钩子回调是 Python，要拿 GIL；建窗时激活窗口偶发
+        # 阻塞主线程数百毫秒且不释放 GIL，钩子挂着的话整个系统的鼠标会跟着冻住。
+        # 卸掉后即使主线程卡住，光标照常移动，按下会排队到已显示的遮罩上
+        caught = self._take_early_press()
+        shots = list(zip(screens, pixmaps))
+
+        cursor_screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        # 光标所在屏最后创建：它的置前调用最后执行，键盘焦点落在这块屏
+        shots.sort(key=lambda t: t[0] is cursor_screen)
+
+        overlays = []
+        try:
+            for s, pm in shots:
+                overlays.append(ScreenshotOverlay(s, None, pm, activate=(s is cursor_screen)))
+        except Exception as e:
+            print(f"启动截图失败: {e}")
+            self._take_early_press()
+            for ov in overlays:
+                ov.close()
+            self.overlay = None
             self._restore_position()
             return
-        
-        if isinstance(data, tuple):
-            if len(data) >= 3:
-                screen, start_pos, prefetched = data[0], data[1], data[2]
-            else:
-                screen, start_pos = data[0], data[1]
-                prefetched = None
+
+        refs = [weakref.ref(ov) for ov in overlays]
+        # 按组计数：快速连按时上一组可能晚于新一组才销毁，不能共用一个计数器，
+        # 否则旧组的销毁会把新组当成已关闭，提前复原胶囊并丢掉新组的引用
+        alive = [len(overlays)]
+
+        def on_destroyed(*_):
+            alive[0] -= 1
+            if alive[0] <= 0 and self._group_overlays is overlays:
+                self._group_overlays = []
+                self._on_overlay_closed()
+
+        for ov in overlays:
+            ov._group = refs
+            ov.destroyed.connect(on_destroyed)
+        # 遮罩无父对象，必须持有强引用；否则函数返回后除 self.overlay 外的遮罩
+        # 会被 Python 立即回收，表现为「只有鼠标所在屏能截图」
+        self._group_overlays = overlays
+        self.overlay = overlays[-1]
+        self._resume_early_press(overlays, caught)
+
+    # ── 热键到遮罩出现之间的左键 ──────────────────────────
+    #
+    # 按下热键到遮罩出现要抓屏 + 建窗约 150ms（首次更久）。这期间用户已经按下左键
+    # 开始拖的话，按下会落到下层应用上（可能拖选了文字、拖动了窗口），遮罩出来后
+    # 选区整次丢失，体感就是「卡了一下」。这里在热键触发时临时挂一个鼠标钩子，
+    # 只吞掉并记下这段时间内的第一次左键按下/松开，遮罩建好后立即卸载并把拖拽接上。
+
+    def _arm_early_press_catcher(self):
+        self._take_early_press()
+        import ctypes
+        from ctypes import wintypes
+
+        # 独立的 user32 句柄：项目里其它钩子代码会改写共享 windll.user32 上
+        # SetWindowsHookExW 的 argtypes（绑定它们自己的回调类型），共用会类型不匹配
+        user32 = ctypes.WinDLL('user32')
+        WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP = 14, 0x0201, 0x0202
+
+        class MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long),
+                ("mouseData", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_void_p),
+            ]
+
+        PROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes.POINTER(MSLLHOOKSTRUCT))
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, PROC, wintypes.HINSTANCE, wintypes.DWORD]
+        user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        user32.CallNextHookEx.restype = wintypes.LPARAM
+        user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+
+        state = {'down': None, 'up': None, 'tid': 0}
+        ready = threading.Event()
+
+        def proc(n, wp, lp):
+            if n >= 0:
+                if wp == WM_LBUTTONDOWN and state['down'] is None:
+                    state['down'] = (lp.contents.pt_x, lp.contents.pt_y)
+                    return 1
+                if wp == WM_LBUTTONUP and state['down'] is not None and state['up'] is None:
+                    state['up'] = (lp.contents.pt_x, lp.contents.pt_y)
+                    return 1
+            return user32.CallNextHookEx(None, n, wp, ctypes.cast(lp, ctypes.c_void_p).value or 0)
+
+        cb = PROC(proc)
+
+        def run():
+            hook = None
+            try:
+                state['tid'] = ctypes.windll.kernel32.GetCurrentThreadId()
+                hook = user32.SetWindowsHookExW(WH_MOUSE_LL, cb, None, 0)
+            finally:
+                ready.set()
+            if not hook:
+                return
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                pass
+            user32.UnhookWindowsHookEx(hook)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        ready.wait(0.05)
+        self._early_press = (state, t, cb)
+        # 钩子挂上时左键已按着 = 按下发生在钩子之前、落到了下层应用，才需要补发；
+        # 之后的按下要么被钩子吞掉，要么（钩子卸载后）直接落在遮罩上
+        self._early_arm_lbtn = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        self._early_arm_pos = (pt.x, pt.y)
+
+    def _take_early_press(self):
+        """卸载临时钩子，返回 (按下点, 松开点) 物理坐标；没有提前按下返回 None。"""
+        ep = getattr(self, '_early_press', None)
+        self._early_press = None
+        if ep is None:
+            return None
+        state, t, _cb = ep
+        if state['tid']:
+            import ctypes
+            ctypes.windll.user32.PostThreadMessageW(state['tid'], 0x0012, 0, 0)  # WM_QUIT
+        t.join(0.1)
+        if state['down'] is None:
+            return None
+        return state['down'], state['up']
+
+    def _resume_early_press(self, overlays, caught=...):
+        if caught is ...:
+            caught = self._take_early_press()
+        if caught is None:
+            self._reclaim_foreign_press(overlays)
+            return
+        (dx, dy), up = caught
+        screens = [ov.target_screen for ov in overlays]
+        idx, press_local = physical_to_local(screens, dx, dy)
+        if idx is None:
+            return
+        if up is not None:
+            ex, ey = up
         else:
-            screen, start_pos, prefetched = data, None, None
-            
-        # 立即启动截图，屏幕选择器已关闭（默认参数绑定，避免闭包滞后）
-        QTimer.singleShot(
-            0,
-            lambda s=screen, sp=start_pos, pf=prefetched: self._start_screenshot_on_screen(s, sp, pf),
-        )
-    
+            import ctypes
+            from ctypes import wintypes
+            pt = wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            ex, ey = pt.x, pt.y
+        end_local = physical_to_screen_local(screens[idx], ex, ey) or press_local
+        try:
+            overlays[idx].resume_early_press(press_local, end_local, still_pressed=up is None)
+        except RuntimeError:
+            pass
+
+    def _reclaim_foreign_press(self, overlays):
+        """左键在热键处理之前就已按下（临时钩子还没挂上），按下落到了下层应用，
+        下层应用开始拖选并抓住了鼠标（SetCapture）。遮罩出现后所有鼠标消息仍发给
+        下层应用，遮罩收不到任何移动，表现为「变暗、光标消失、画面卡住」，
+        松手再拖才恢复。
+
+        处理：遮罩置前后补发一次左键松开（结束下层应用的拖拽、释放其鼠标抓取）
+        和一次左键按下（落到遮罩上，正常进入框选），起点用热键触发时的光标位置。
+        """
+        import ctypes
+        user32 = ctypes.windll.user32
+        # 只处理「钩子挂上前就已按下」的情况。钩子卸载后才按下的左键直接落在遮罩上，
+        # 此时若误补发「松开+按下」，会先生成一个极小选区，再把后续拖动变成移动这个
+        # 小选区，表现为「拖了却不出选区」，松手重拖才恢复
+        if not getattr(self, '_early_arm_lbtn', False):
+            return
+        if not (user32.GetAsyncKeyState(0x01) & 0x8000):  # VK_LBUTTON
+            return
+        arm = getattr(self, '_early_arm_pos', None)
+        screens = [ov.target_screen for ov in overlays]
+        idx, start_local = physical_to_local(screens, *arm) if arm else (None, None)
+        target = overlays[idx] if idx is not None else None
+
+        def inject():
+            if not (user32.GetAsyncKeyState(0x01) & 0x8000):
+                return  # 已经松手，不再补发
+            if target is not None:
+                try:
+                    target._press_origin_override = start_local
+                except RuntimeError:
+                    pass
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 0x0002, 0x0004
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+
+            def clear():
+                try:
+                    if target is not None:
+                        target._press_origin_override = None
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(300, clear)
+
+        # 排在遮罩 _force_foreground（同为 0ms 定时器）之后执行，保证补发的按下落到遮罩上
+        QTimer.singleShot(0, inject)
+
     def _start_screenshot_on_screen(self, screen, start_pos=None, prefetched_pixmap=None):
         # 再次检查是否已有截图窗口
         if hasattr(self, 'overlay') and self.overlay is not None:
             try:
                 if self.overlay.isVisible():
+                    self._take_early_press()
                     return
             except RuntimeError:
                 self.overlay = None
@@ -1191,12 +1411,15 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         try:
             self.overlay = ScreenshotOverlay(screen, start_pos, prefetched_pixmap)
             self.overlay.destroyed.connect(self._on_overlay_closed)
+            self._resume_early_press([self.overlay])
         except Exception as e:
             print(f"启动截图失败: {e}")
+            self._take_early_press()
             self.overlay = None
             self._restore_position()
     
     def _on_overlay_closed(self):
+        self._resume_side_hook()
         app = QApplication.instance()
         if hasattr(app, '_editor_windows') and app._editor_windows:
             self.overlay = None
@@ -1214,6 +1437,7 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         self._restore_position()
     
     def _restore_position(self):
+        self._resume_side_hook()
         self.overlay = None
         if self._saved_pos is not None:
             self.move(self._saved_pos)
@@ -1229,40 +1453,8 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
     def _open_settings(self):
         import traceback
 
-        def _slog(msg):
-            """无条件落盘的诊断日志（排查设置面板打不开）"""
-            try:
-                import datetime
-                with open(r'F:\Idea\Artco\_settings_trace.log', 'a',
-                          encoding='utf-8') as f:
-                    f.write('[%s] %s\n' % (
-                        datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3], msg))
-            except Exception:
-                pass
-
-        _slog('=== _open_settings ENTER ===')
-        try:
-            _slog('CALLER STACK:\n' + ''.join(traceback.format_stack()[-6:-1]))
-        except Exception:
-            pass
-
-        def _native_state(d):
-            """用原生 Win32 复核窗口是否真的显示在屏幕上"""
-            try:
-                import ctypes
-                hwnd = int(d.winId())
-                u = ctypes.windll.user32
-                return ('hwnd=0x%X nativeVisible=%s iconic=%s enabled=%s '
-                        'foreground_is_self=%s' % (
-                            hwnd, bool(u.IsWindowVisible(hwnd)),
-                            bool(u.IsIconic(hwnd)), bool(u.IsWindowEnabled(hwnd)),
-                            u.GetForegroundWindow() == hwnd))
-            except Exception as e:
-                return 'native probe failed: %r' % (e,)
-
         # 缓存复用模式：对话框只创建一次，关闭时仅隐藏不销毁
         if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
-            _slog('branch=REUSE existing dialog')
             try:
                 # 顺序要求：先 show，再由 _ensure_on_screen 做原生兜底，
                 # 否则 IsWindowVisible 检查跑在显示动作之前等于无效。
@@ -1270,25 +1462,18 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
                 self._settings_dialog.raise_()
                 self._settings_dialog.activateWindow()
                 self._settings_dialog._ensure_on_screen()
-                _slog('REUSE done: isVisible=%s geo=%s' % (
-                    self._settings_dialog.isVisible(),
-                    self._settings_dialog.geometry().getRect()))
-                _slog('REUSE native: ' + _native_state(self._settings_dialog))
                 return
             except RuntimeError:
                 # C++ 对象已被回收（理论上不会发生，但做兜底）
-                _slog('REUSE RuntimeError -> reset ref')
                 self._settings_dialog = None
             except Exception:
-                _slog('REUSE EXCEPTION:\n' + traceback.format_exc())
+                traceback.print_exc()
                 self._settings_dialog = None
 
         try:
-            _slog('branch=CREATE new dialog')
             # 不传 parent：浮窗带 WindowStaysOnTopHint，若作为 parent，
             # 对话框会继承置顶层级并被限制在浮窗坐标系内，导致显示到屏幕外
             dlg = SettingsDialog(None)
-            _slog('SettingsDialog constructed OK')
             self._settings_dialog = dlg
             dlg.hotkey_changed.connect(self._on_hotkey_changed)
             dlg._appearance_preview_callback = self._refresh_appearance
@@ -1296,10 +1481,7 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
             dlg.show()
             dlg._ensure_on_screen()
-            _slog('CREATE done: isVisible=%s geo=%s' % (
-                dlg.isVisible(), dlg.geometry().getRect()))
         except Exception:
-            _slog('CREATE EXCEPTION:\n' + traceback.format_exc())
             traceback.print_exc()
     
     def _refresh_appearance(self):
@@ -1330,23 +1512,8 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             self.container.setStyleSheet(self._normal_style)
     
     def _open_prompt_settings(self):
-        import traceback as _tb
-
-        def _slog(msg):
-            try:
-                import datetime
-                with open(r'F:\Idea\Artco\_settings_trace.log', 'a',
-                          encoding='utf-8') as f:
-                    f.write('[%s] %s\n' % (
-                        datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3], msg))
-            except Exception:
-                pass
-
-        _slog('=== _open_prompt_settings ENTER ===')
-        _slog('CALLER STACK:\n' + ''.join(_tb.format_stack()[-6:-1]))
         # 统一入口：在设置面板内管理 Prompt（复用同一个对话框实例）
         if hasattr(self, '_settings_dialog') and self._settings_dialog is not None:
-            _slog('prompt branch=REUSE')
             try:
                 self._settings_dialog.show_tab('prompt')
                 self._settings_dialog.show()
@@ -1355,13 +1522,10 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
                 # 顺序要求：兜底显示必须在 show() 之后执行，否则原生
                 # IsWindowVisible 检查跑在 Qt 显示动作之前，等于无效。
                 self._settings_dialog._ensure_on_screen()
-                _slog('prompt REUSE done: isVisible=%s' % (
-                    self._settings_dialog.isVisible(),))
                 return
             except RuntimeError:
                 self._settings_dialog = None
 
-        _slog('prompt branch=CREATE')
         # 不传 parent：避免继承浮窗置顶层级导致对话框显示到屏幕外
         dlg = SettingsDialog(None)
         self._settings_dialog = dlg
@@ -1371,7 +1535,6 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         dlg.show_tab('prompt')
         dlg.show()
         dlg._ensure_on_screen()
-        _slog('prompt CREATE done: isVisible=%s' % dlg.isVisible())
     
     def _setup_tray_icon(self):
         """设置系统托盘图标"""
@@ -1945,6 +2108,29 @@ if __name__ == "__main__":
     window = CapsuleWidget()
 
     window.reveal(animated=False)
+
+    def _warm_up_activation():
+        """预热窗口激活：进程内第一次 activateWindow 有约 70ms 冷启动开销，
+        不预热的话会落在开机后第一次按 F1 上。这里用一个透明 1px 窗口激活一次，
+        随即关闭并把前台还给原窗口，用户无感知。"""
+        try:
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            w = QWidget()
+            w.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+            w.setWindowOpacity(0.0)
+            w.setGeometry(0, 0, 1, 1)
+            w.show()
+            w.activateWindow()
+            app.processEvents()
+            w.close()
+            w.deleteLater()
+            if fg:
+                user32.SetForegroundWindow(fg)
+        except Exception:
+            pass
+
+    QTimer.singleShot(1500, _warm_up_activation)
     sys.exit(app.exec())
 
 

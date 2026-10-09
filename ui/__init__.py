@@ -9,7 +9,6 @@ UI 组件模块 - 解耦后的统一导出
 - workbench.py      : 工作台窗口（侧栏导航 + 面板）
 - ai_result.py      : AI 结果展示组件
 - image_viewer.py   : 图片浏览器（独立入口 viewer_main.py 使用）
-- assign_panel.py   : 分配面板
 """
 
 from .ai_worker import AIWorker
@@ -19,7 +18,6 @@ from .archive import ArchiveDetailDialog, ArchiveCard, ArchiveGalleryPanel, Clip
 from .workbench import WorkbenchWindow
 from .ai_result import AIResultBubble, AIResultPanel, AIImageResultWindow
 from .gen_canvas import GenCanvas
-from .assign_panel import AssignPanel
 from .clipboard_float import ClipboardFloatPanel
 
 __all__ = [
@@ -49,9 +47,6 @@ __all__ = [
     
     # AI 工作台
     'GenCanvas',
-    
-    # 分配面板
-    'AssignPanel',
     
     # 剪贴板悬浮面板
     'ClipboardFloatPanel',

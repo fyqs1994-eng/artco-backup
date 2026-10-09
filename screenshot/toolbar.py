@@ -232,7 +232,6 @@ class EditorToolbar(QWidget):
     ai_clicked = Signal()
     archive_clicked = Signal()
     undo_clicked = Signal()
-    assign_clicked = Signal()  # 新增：分配反馈
     color_changed = Signal(QColor)  # 标记颜色变化
     
     def __init__(self, parent=None):
@@ -311,7 +310,6 @@ class EditorToolbar(QWidget):
             ('mdi6.content-copy', "复制到剪贴板", self.copy_clicked, "action_btn"),
             ('mdi6.content-save', "保存为文件", self.save_clicked, "action_btn"),
             ('mdi6.auto-fix', "AI 分析", self.ai_clicked, "action_btn"),
-            ('mdi6.send', "分配反馈", self.assign_clicked, "btn_assign"),
             ('mdi6.inbox-arrow-down', "归档到历史记录", self.archive_clicked, "btn_archive"),
         ]
         
@@ -327,8 +325,6 @@ class EditorToolbar(QWidget):
             btn.setObjectName(obj_name)
             if obj_name == "btn_archive":
                 self.btn_archive = btn
-            elif obj_name == "btn_assign":
-                self.btn_assign = btn
             layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignHCenter)
         
         self.setStyleSheet("""
@@ -391,6 +387,7 @@ class _DropdownItemButton(QPushButton):
     _COLOR_MAP = {
         "text": QColor(99, 102, 241),
         "image": QColor(236, 72, 153),
+        "history": QColor(107, 114, 128),
     }
     
     def __init__(self, text: str, prompt_type: str = "text", parent=None):
@@ -483,7 +480,10 @@ class _DropdownPanel(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._scroll.setMaximumHeight(210)
+        # 内容顶部对齐，避免内容不足时被垂直居中撑出上下空白
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # 高度上限（内容超出时才滚动），实际高度由 fitToContent 动态设置
+        self._max_content_height = 210
         self._scroll.setStyleSheet("""
             QScrollArea { background: transparent; border: none; }
             QScrollArea > QWidget > QWidget { background: transparent; }
@@ -496,11 +496,38 @@ class _DropdownPanel(QWidget):
         self._outer_layout.addWidget(self._scroll)
     
     def setContentLayout(self, layout):
-        """设置内容布局"""
+        """设置内容布局
+
+        显式回收上一个内容容器，避免反复切换内容时旧控件残留。
+        """
+        old = self._scroll.takeWidget()
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
         container = QWidget()
         container.setStyleSheet("background: transparent;")
+        # 内容布局顶部对齐，防止只有 1~2 项时被居中撑高
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         container.setLayout(layout)
         self._scroll.setWidget(container)
+        self.fitToContent()
+    
+    def fitToContent(self):
+        """让下拉高度严格跟随内容高度
+
+        - 内容较少：高度 == 内容实际高度（无空白）
+        - 内容较多：封顶到 _max_content_height，由滚动条承载溢出
+        """
+        widget = self._scroll.widget()
+        if widget is None:
+            return
+        content_height = widget.sizeHint().height()
+        target = min(content_height, self._max_content_height)
+        self._scroll.setFixedHeight(target)
+        # 整体尺寸 = 内容区 + 上下阴影留白
+        total = target + self._margin * 2 + 4
+        self.setFixedHeight(total)
+        self.update()
     
     def paintEvent(self, event):
         """自绘圆角背景 + 阴影"""
@@ -614,33 +641,12 @@ class ScreenshotAICapsule(QWidget):
     def _refresh_prompts(self):
         """刷新本实例的 prompts 数据和下拉列表 UI（由 refresh_all_instances 调用）"""
         self._prompts = self._load_prompts()
-        
-        # 清空旧的下拉列表按钮
-        if hasattr(self, '_template_buttons'):
-            for _, btn, _ in self._template_buttons:
-                btn.deleteLater()
-        self._template_buttons = []
-        
-        # 重建下拉列表
+
+        # 重建下拉列表（setContentLayout 内部会回收旧容器）
         if hasattr(self, '_dropdown'):
-            old_layout = self._dropdown._scroll.widget().layout() if self._dropdown._scroll.widget() else None
-            if old_layout:
-                while old_layout.count():
-                    item = old_layout.takeAt(0)
-                    if item.widget():
-                        item.widget().deleteLater()
-            
-            dropdown_inner_layout = QVBoxLayout()
-            dropdown_inner_layout.setContentsMargins(6, 6, 6, 6)
-            dropdown_inner_layout.setSpacing(2)
-            
-            for name, content, prompt_type in self._prompts:
-                btn = _DropdownItemButton(name, prompt_type)
-                btn.clicked.connect(lambda checked, n=name, c=content, t=prompt_type: self._on_template_clicked(n, c, t))
-                dropdown_inner_layout.addWidget(btn)
-                self._template_buttons.append((name, btn, prompt_type))
-            
-            self._dropdown.setContentLayout(dropdown_inner_layout)
+            self._dropdown_mode = None
+            self._dropdown.hide()
+            self._build_template_dropdown()
     
     @classmethod
     def invalidate_prompts_cache(cls):
@@ -744,19 +750,8 @@ class ScreenshotAICapsule(QWidget):
         # ─── 下拉列表（自绘圆角悬浮卡片）───
         self._dropdown = _DropdownPanel(self.parent() if self.parent() else self)
         self._dropdown.hide()
-        
-        dropdown_inner_layout = QVBoxLayout()
-        dropdown_inner_layout.setContentsMargins(6, 6, 6, 6)
-        dropdown_inner_layout.setSpacing(2)
-        
         self._template_buttons = []
-        for name, content, prompt_type in self._prompts:
-            btn = _DropdownItemButton(name, prompt_type)
-            btn.clicked.connect(lambda checked, n=name, c=content, t=prompt_type: self._on_template_clicked(n, c, t))
-            dropdown_inner_layout.addWidget(btn)
-            self._template_buttons.append((name, btn, prompt_type))
-        
-        self._dropdown.setContentLayout(dropdown_inner_layout)
+        self._build_template_dropdown()
         
         self.setStyleSheet("""
             ScreenshotAICapsule {
@@ -828,6 +823,7 @@ class ScreenshotAICapsule(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         
         self._dropdown_selected_index = -1
+        self._dropdown_mode = None  # None / "template" / "history"
         self.input_field.installEventFilter(self)
         self.input_container.installEventFilter(self)
         
@@ -835,15 +831,24 @@ class ScreenshotAICapsule(QWidget):
         self.setFixedWidth(self.COLLAPSED_WIDTH)
     
     def _on_text_changed(self, text: str):
-        """输入框文本变化 - 输入 / 时显示模板列表"""
+        """输入框文本变化
+
+        - 输入 / 时：显示匹配的模板列表
+        - 文本为空时：显示最近的历史命令（若历史为空则隐藏）
+        - 其他情况：隐藏下拉列表
+        """
         self._dropdown_selected_index = -1
-        # 检查是否以 / 开头或包含 /
+
         if '/' in text:
             # 提取 / 后面的搜索词进行过滤
             slash_idx = text.rfind('/')
             search_term = text[slash_idx + 1:].lower()
-            
-            # 过滤并显示匹配的模板
+
+            # 若当前不是模板模式，先重建模板下拉内容
+            # （历史模式会替换掉下拉内容，导致原模板按钮被回收）
+            if self._dropdown_mode != "template" or not self._template_buttons_alive():
+                self._build_template_dropdown()
+
             visible_count = 0
             for name, btn, ptype in self._template_buttons:
                 if search_term == '' or search_term in name.lower():
@@ -851,24 +856,114 @@ class ScreenshotAICapsule(QWidget):
                     visible_count += 1
                 else:
                     btn.hide()
-            
+
             if visible_count > 0:
+                self._dropdown_mode = "template"
                 self._update_dropdown_position()
-            else:
+            elif self._dropdown_mode == "template":
                 self._dropdown.hide()
+                self._dropdown_mode = None
+            return
+
+        # 非 / 输入：空文本时展示历史记录
+        if not text.strip():
+            self._show_history_dropdown()
         else:
-            self._dropdown.hide()
+            if self._dropdown_mode == "history" or self._dropdown.isVisible():
+                self._dropdown.hide()
+                self._dropdown_mode = None
+
+    def _template_buttons_alive(self) -> bool:
+        """检查当前缓存的模板按钮是否仍然有效（未被回收）"""
+        if not getattr(self, '_template_buttons', None):
+            return False
+        try:
+            # 访问 C++ 对象，若已被销毁会抛 RuntimeError
+            return self._template_buttons[0][1].objectName() is not None
+        except RuntimeError:
+            return False
+
+    def _build_template_dropdown(self):
+        """构建/重建模板下拉内容"""
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        self._template_buttons = []
+        for name, content, prompt_type in self._prompts:
+            btn = _DropdownItemButton(name, prompt_type)
+            btn.clicked.connect(
+                lambda checked, n=name, c=content, t=prompt_type: self._on_template_clicked(n, c, t)
+            )
+            layout.addWidget(btn)
+            self._template_buttons.append((name, btn, prompt_type))
+        self._dropdown.setContentLayout(layout)
+
+    def _show_history_dropdown(self):
+        """文本为空时展示最近的历史命令下拉列表"""
+        if not self._is_expanded:
+            return
+        try:
+            from config import ai_cmd_history
+            history = ai_cmd_history.get_history()
+        except Exception:
+            history = []
+
+        if not history:
+            if self._dropdown_mode == "history":
+                self._dropdown.hide()
+                self._dropdown_mode = None
+            return
+
+        self._history_items = []
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
+        for cmd in history:
+            btn = _DropdownItemButton(cmd, "history")
+            btn.setToolTip(cmd)
+            btn.clicked.connect(lambda checked, c=cmd: self._on_history_clicked(c))
+            layout.addWidget(btn)
+            self._history_items.append((cmd, btn, "history"))
+        self._dropdown.setContentLayout(layout)
+
+        self._dropdown_mode = "history"
+        self._update_dropdown_position()
+
+    def _on_history_clicked(self, cmd: str):
+        """点击历史命令 - 填入输入框并聚焦"""
+        self.input_field.setText(cmd)
+        self.input_field.setFocus()
+        self.input_field.setCursorPosition(len(cmd))
+        self._dropdown.hide()
+        self._dropdown_mode = None
+
+    def _current_dropdown_items(self):
+        """返回当前下拉列表中可见的项（兼容模板模式与历史模式）"""
+        if self._dropdown_mode == "history":
+            return [(c, b, t) for c, b, t in getattr(self, '_history_items', []) if b.isVisible()]
+        return [(n, b, t) for n, b, t in getattr(self, '_template_buttons', []) if b.isVisible()]
     
     def eventFilter(self, obj, event):
-        """拦截输入框的键盘事件，支持上下键选择下拉列表；转发容器点击到输入框"""
+        """拦截输入框的事件：
+
+        - FocusIn：输入框为空时自动展开历史记录下拉
+        - KeyPress：上下键选择下拉项、Enter 确认、Esc 关闭
+        - input_container 点击：聚焦输入框
+        """
+        if obj is self.input_field and event.type() == QEvent.Type.FocusIn:
+            # 聚焦时若输入框为空，自动展开最近历史命令
+            if not self.input_field.text().strip():
+                QTimer.singleShot(0, self._show_history_dropdown)
+            return super().eventFilter(obj, event)
+
         if obj is self.input_field and event.type() == QEvent.Type.KeyPress:
             if not self._dropdown.isVisible():
                 return super().eventFilter(obj, event)
-            
-            visible_items = [(name, btn, ptype) for name, btn, ptype in self._template_buttons if btn.isVisible()]
+
+            visible_items = self._current_dropdown_items()
             if not visible_items:
                 return super().eventFilter(obj, event)
-            
+
             key = event.key()
             if key == Qt.Key.Key_Down:
                 self._dropdown_selected_index = min(self._dropdown_selected_index + 1, len(visible_items) - 1)
@@ -884,6 +979,7 @@ class ScreenshotAICapsule(QWidget):
                     return True
             elif key == Qt.Key.Key_Escape:
                 self._dropdown.hide()
+                self._dropdown_mode = None
                 self._dropdown_selected_index = -1
                 return True
         # 点击 input_container 的 padding 区域时聚焦输入框（点击落在子控件上时由子控件自行处理）
@@ -983,8 +1079,9 @@ class ScreenshotAICapsule(QWidget):
         else:
             screen_rect = QGuiApplication.primaryScreen().geometry()
         
-        # 计算下拉框高度
-        self._dropdown.adjustSize()
+        # 先固定宽度（与输入框一致），再让高度严格跟随内容
+        self._dropdown.setFixedWidth(self.input_container.width())
+        self._dropdown.fitToContent()
         dropdown_height = self._dropdown.height()
         
         # 默认向下展开的位置
@@ -996,7 +1093,6 @@ class ScreenshotAICapsule(QWidget):
             container_global_pos = self.input_container.mapToGlobal(QPoint(0, -dropdown_height - 4))
         
         self._dropdown.move(container_global_pos)
-        self._dropdown.setFixedWidth(self.input_container.width())
         self._dropdown.show()
         self._dropdown.raise_()
 
@@ -1033,6 +1129,8 @@ class ScreenshotAICapsule(QWidget):
         
         # 隐藏下拉列表
         self._dropdown.hide()
+        self._dropdown_mode = None
+        self._dropdown_selected_index = -1
         
         self._width_anim.stop()
         self._width_anim.setStartValue(self.width())
@@ -1051,6 +1149,17 @@ class ScreenshotAICapsule(QWidget):
         """发送输入内容"""
         text = self.input_field.text().strip()
         if text:
+            # 记录历史命令（原始输入，便于下次直接复用）
+            try:
+                from config import ai_cmd_history
+                ai_cmd_history.add_history(text)
+            except Exception:
+                pass
+
+            # 隐藏下拉并重置状态
+            self._dropdown.hide()
+            self._dropdown_mode = None
+
             match = re.search(r'\[(.+?)\]', text)
             
             if match:

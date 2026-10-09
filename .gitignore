@@ -60,6 +60,12 @@ _g_join.py
 _g*.py
 verify_*.png
 _shot_*.png
+_tmp_*.py
+_mem_probe.py
+/screenshot.png
+
+# 本机运行数据
+ai_cmd_history.json
 
 # Artco specific
 *.exe

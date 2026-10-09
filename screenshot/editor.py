@@ -61,7 +61,6 @@ class EditorWindow(QMainWindow):
         self.toolbar.ai_clicked.connect(self._ai_analyze)
         self.toolbar.archive_clicked.connect(self._archive_record)
         self.toolbar.undo_clicked.connect(self._on_undo)
-        self.toolbar.assign_clicked.connect(self._assign_feedback)
         self.toolbar.color_changed.connect(self._on_color_changed)
         
         # 工具栏阴影
@@ -527,21 +526,6 @@ class EditorWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.warning(self, "归档失败", f"保存记录时出错：{e}")
-    
-    def _assign_feedback(self):
-        """打开分配反馈对话框"""
-        final_pixmap = self._render_final_image()
-        
-        from ui.feedback_dialog import FeedbackDialog
-        dialog = FeedbackDialog(final_pixmap, self)
-        dialog.feedback_sent.connect(self._on_feedback_sent)
-        dialog.exec()
-    
-    def _on_feedback_sent(self, target_type: str, target_id: str, note: str):
-        """反馈发送完成"""
-        if target_type == "clipboard":
-            self.setWindowTitle("Artco 编辑器 - ✓ 已复制到剪贴板")
-            QTimer.singleShot(1500, lambda: self.setWindowTitle("Artco 编辑器"))
     
     def _close_after_archive(self):
         self.canvas.marks.clear()

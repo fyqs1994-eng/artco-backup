@@ -117,8 +117,23 @@ class ArchiveDetailDialog(QWidget):
         # 图片区域（带悬浮复制按钮）
         image_path = get_image_full_path(self.record.get("image_path", ""))
         if image_path.exists():
-            self._pixmap = QPixmap(str(image_path))
-            scaled = self._pixmap.scaled(760, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            # 用 QImageReader 在解码阶段就缩放到显示尺寸（与本文件缩略图路径一致），
+            # 避免 QPixmap(path) 把整张原图读入内存。用户常处理上万像素的大图，
+            # 单张全尺寸解码即数百 MB，而此处实际只需要 760×400 的显示尺寸。
+            self._image_path = str(image_path)
+            from PySide6.QtGui import QImageReader
+            reader = QImageReader(str(image_path))
+            reader.setAutoTransform(True)
+            # 先按目标显示尺寸约束解码，读取器会自动保持宽高比
+            origin = reader.size()
+            if origin.isValid() and origin.width() > 0 and origin.height() > 0:
+                scaled_size = origin.scaled(
+                    QSize(760, 400), Qt.AspectRatioMode.KeepAspectRatio
+                )
+                reader.setScaledSize(scaled_size)
+            scaled = QPixmap.fromImage(reader.read())
+            # 详情页仅持有缩放后的显示图；原图不常驻内存（见 _get_full_pixmap）
+            self._pixmap = scaled
             
             # 图片容器
             image_container = QWidget()
@@ -340,8 +355,24 @@ class ArchiveDetailDialog(QWidget):
         QGuiApplication.clipboard().setText(self.record.get("ai_text", ""))
     
     def _copy_image(self):
-        if self._pixmap:
-            QGuiApplication.clipboard().setPixmap(self._pixmap)
+        # 复制需要原图质量，这里按需从磁盘加载，不复用详情页的缩放图
+        # （详情页的 self._pixmap 现在只为显示而解码到 760×400）
+        pixmap = self._get_full_pixmap()
+        if pixmap:
+            QGuiApplication.clipboard().setPixmap(pixmap)
+
+    def _get_full_pixmap(self) -> Optional[QPixmap]:
+        """按需从磁盘加载原图。
+
+        详情页为了省内存，只把图片解码到显示尺寸；凡是需要原图质量的操作
+        （复制到剪贴板、转 base64 送 AI）都通过本方法临时加载，用完即释放，
+        不让原图常驻。
+        """
+        path = getattr(self, '_image_path', None)
+        if not path or not os.path.exists(path):
+            return None
+        pixmap = QPixmap(path)
+        return pixmap if not pixmap.isNull() else None
     
     def resizeEvent(self, event):
         """窗口大小变化时重新定位悬浮按钮"""
@@ -579,13 +610,15 @@ class ArchiveDetailDialog(QWidget):
     
     def _do_ai_process(self, prompt: str, prompt_type: str):
         """执行 AI 处理"""
-        if not self._pixmap:
+        # 送 AI 需要原图质量，按需加载（详情页只持有显示用的缩放图）
+        full_pixmap = self._get_full_pixmap()
+        if not full_pixmap:
             return
         
         # 转换图片为 base64
         buffer = QBuffer()
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        self._pixmap.save(buffer, "PNG")
+        full_pixmap.save(buffer, "PNG")
         base64_data = base64.b64encode(buffer.data().data()).decode()
         
         # 调用胶囊进行 AI 处理

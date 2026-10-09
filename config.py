@@ -953,94 +953,6 @@ class PhotoshopConfigManager:
 ps_config = PhotoshopConfigManager()
 
 
-# ==================== 企业微信 Webhook 配置 ====================
-
-WECOM_CONFIG_PATH = os.path.join(get_app_dir(), "wecom_config.json")
-
-DEFAULT_WECOM_CONFIG = {
-    "webhooks": [],  # 格式: [{"name": "群名", "url": "webhook url"}, ...]
-    "last_used": ""  # 上次使用的 webhook name
-}
-
-
-class WeComConfigManager:
-    """企业微信配置管理器"""
-    _instance = None
-    _config = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._load_config()
-        return cls._instance
-    
-    def _load_config(self):
-        """加载配置"""
-        if os.path.exists(WECOM_CONFIG_PATH):
-            try:
-                with open(WECOM_CONFIG_PATH, 'r', encoding='utf-8') as f:
-                    self._config = json.load(f)
-                # 合并默认配置
-                for key, value in DEFAULT_WECOM_CONFIG.items():
-                    if key not in self._config:
-                        self._config[key] = value
-            except Exception:
-                self._config = DEFAULT_WECOM_CONFIG.copy()
-        else:
-            self._config = DEFAULT_WECOM_CONFIG.copy()
-    
-    def _save_config(self):
-        """保存配置"""
-        try:
-            with open(WECOM_CONFIG_PATH, 'w', encoding='utf-8') as f:
-                json.dump(self._config, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-    
-    def get_webhooks(self) -> list:
-        """获取所有 webhook 配置"""
-        return self._config.get("webhooks", [])
-    
-    def add_webhook(self, name: str, url: str):
-        """添加 webhook"""
-        webhooks = self._config.get("webhooks", [])
-        # 检查是否已存在
-        for wh in webhooks:
-            if wh["name"] == name:
-                wh["url"] = url
-                self._save_config()
-                return
-        webhooks.append({"name": name, "url": url})
-        self._config["webhooks"] = webhooks
-        self._save_config()
-    
-    def remove_webhook(self, name: str):
-        """移除 webhook"""
-        webhooks = self._config.get("webhooks", [])
-        self._config["webhooks"] = [wh for wh in webhooks if wh["name"] != name]
-        self._save_config()
-    
-    def get_webhook_url(self, name: str) -> str:
-        """根据名称获取 webhook URL"""
-        for wh in self._config.get("webhooks", []):
-            if wh["name"] == name:
-                return wh["url"]
-        return ""
-    
-    def get_last_used(self) -> str:
-        """获取上次使用的 webhook"""
-        return self._config.get("last_used", "")
-    
-    def set_last_used(self, name: str):
-        """设置上次使用的 webhook"""
-        self._config["last_used"] = name
-        self._save_config()
-
-
-# 全局企业微信配置管理器实例
-wecom_config = WeComConfigManager()
-
-
 # ════════════════════════════════════════════════════════════
 # 外观配置 (浮窗背景渐变/图片自定义)
 # ════════════════════════════════════════════════════════════
@@ -1215,3 +1127,81 @@ class AppearanceConfigManager:
 
 # 全局外观配置管理器实例
 appearance_config = AppearanceConfigManager()
+
+
+# ==================== AI 快速编辑命令历史 ====================
+
+AI_CMD_HISTORY_PATH = os.path.join(get_app_dir(), "ai_cmd_history.json")
+
+# 最多保留的历史条数
+AI_CMD_HISTORY_MAX = 3
+
+DEFAULT_AI_CMD_HISTORY = {
+    "history": [],
+}
+
+
+class AICmdHistoryManager:
+    """AI 快速编辑命令历史管理器
+
+    记录用户最近发送的快速编辑命令（最多 3 条），
+    点击 AI 输入框时以下拉列表形式展开，方便重复使用。
+    """
+    _instance = None
+    _config = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._load_config()
+        return cls._instance
+
+    def _load_config(self):
+        """加载配置"""
+        if os.path.exists(AI_CMD_HISTORY_PATH):
+            try:
+                with open(AI_CMD_HISTORY_PATH, 'r', encoding='utf-8') as f:
+                    self._config = json.load(f)
+                for key, value in DEFAULT_AI_CMD_HISTORY.items():
+                    if key not in self._config:
+                        self._config[key] = value
+            except Exception:
+                self._config = DEFAULT_AI_CMD_HISTORY.copy()
+        else:
+            self._config = DEFAULT_AI_CMD_HISTORY.copy()
+
+    def _save_config(self):
+        """保存配置"""
+        try:
+            with open(AI_CMD_HISTORY_PATH, 'w', encoding='utf-8') as f:
+                json.dump(self._config, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def get_history(self) -> list:
+        """获取历史命令（最新的在前）"""
+        history = self._config.get("history", [])
+        if not isinstance(history, list):
+            return []
+        return history
+
+    def add_history(self, text: str):
+        """添加一条历史命令（去重，最多保留 AI_CMD_HISTORY_MAX 条）"""
+        text = (text or "").strip()
+        if not text:
+            return
+        history = self.get_history()
+        # 已存在则先移除，再插到最前，实现"最近使用前置"
+        history = [h for h in history if h != text]
+        history.insert(0, text)
+        self._config["history"] = history[:AI_CMD_HISTORY_MAX]
+        self._save_config()
+
+    def clear_history(self):
+        """清空历史命令"""
+        self._config["history"] = []
+        self._save_config()
+
+
+# 全局 AI 命令历史管理器实例
+ai_cmd_history = AICmdHistoryManager()

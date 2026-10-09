@@ -62,9 +62,12 @@ class ImageCache:
     def _init_cache(self):
         self._cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
-        self._max_size = 20
+        # 阈值下调：用户常处理上万像素的大图，单张全尺寸解码即数百 MB。
+        # 原先 20 张 / 500MB 的预算对超大图过于宽松，容易让缓存本身成为内存大头。
+        # 预览图（已缩放，单张很小）可保留较大数量，成本低且能显著提升滚动体验。
+        self._max_size = 6
         self._max_preview_size = 50
-        self._max_memory_mb = 500
+        self._max_memory_mb = 150
         self._current_memory = 0
 
     @staticmethod

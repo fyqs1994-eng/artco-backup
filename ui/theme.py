@@ -73,13 +73,22 @@ COLOR_WARNING_SUBTLE = "#fffbe6" # 警告背景 - Ant Gold 1
 COLOR_ERROR_SUBTLE = "#fff1f0"   # 错误背景 - Ant Red 1
 COLOR_INFO_SUBTLE = "#e6f4ff"    # 信息背景 - Ant Blue 1
 
+# 表单控件强调色（ui/fluent_controls.py 使用）
+# 沿用原 qfluentwidgets 默认主题色 #009faa 及其派生色，保证去依赖后视觉不变。
+FORM_ACCENT = "#009faa"          # 主色
+FORM_ACCENT_LIGHT_1 = "#00a7b3"  # Hover 背景 / 主色描边
+FORM_ACCENT_LIGHT_2 = "#2daab3"  # Hover 描边
+FORM_ACCENT_LIGHT_3 = "#3eabb3"  # Pressed
+FORM_ACCENT_DARK_1 = "#007780"   # 底部描边
+FORM_FONT_FAMILIES = ["Segoe UI", "Microsoft YaHei", "PingFang SC"]
+FORM_FONT_PX = 14
+
 
 # 品牌/文件图标
 ICON_FOLDER = COLOR_WARNING
 FILE_ICON_PSD = "#31A8FF"
 FILE_ICON_IMAGE = COLOR_SUCCESS
 FILE_ICON_GIF = COLOR_ERROR
-BRAND_WECHAT = "#07c160"
 
 
 # 资源类型颜色（与 config.py RESOURCE_TYPES 保持一致）
