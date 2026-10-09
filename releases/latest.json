@@ -1,8 +1,8 @@
 {
-    "version": "1.2.5",
-    "url": "https://github.com/fyqs1994-eng/artco-backup/releases/download/v1.2.5/Artco.exe",
-    "changelog": "截图待办体验修复与优化\n- 修复截图时首次 Ctrl+C 复制不到当前截图、需再按一次的问题（全局热键触发时强制置前）\n- 待办屏贴投影与普通屏贴视觉统一\n- 修复待办屏贴标题栏下半部分光标变化但无法拖拽的问题\n- 修复待办打勾后图片发虚（分辨率减半）的问题\n- 待办复选框放大至 18px 并与文字/缩略图垂直居中对齐，新增 hover 反馈\n- 新增企业微信待办 MCP 客户端",
-    "sha256": "3A03D162A20087F8BB98E2792484A278BC663A89B9C2A59C0346BF6A252812CC",
+    "version": "1.2.6",
+    "url": "https://github.com/fyqs1994-eng/artco-backup/releases/download/v1.2.6/Artco.exe",
+    "changelog": "截图手感大幅优化，内存占用显著下降\n- 多屏改为每块屏独立遮罩，按 F1 后直接在任意屏框选，修复黑屏、窗口缩放异常与分辨率跳变\n- 新增窗口自动识别：悬停高亮窗口，单击选中整个窗口，双击完成截图\n- 右键改为先清除选区，无选区时再右键退出\n- 截图十字光标改为白线黑边，暗区与选区内都清晰可见\n- 抓屏改用系统接口并行抓取，按 F1 出画面更快，修复偶发卡顿与鼠标冻住\n- 修复 AI 输入框输入空格后失去焦点的问题\n- 移除 qfluentwidgets 与旧侧栏等冗余组件，内存占用明显降低",
+    "sha256": "2D571600AF2FA616E38A429C37E18DEAD669944DC8DDBF1B806433AA1D955070",
     "min_required": "1.0.0",
-    "release_date": "2026-09-10"
+    "release_date": "2026-10-09"
 }
