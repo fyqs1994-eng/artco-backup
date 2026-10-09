@@ -12,7 +12,6 @@
 - 拖放打开、GIF 动图、PSD 首帧
 """
 
-import os
 from pathlib import Path
 from typing import Optional
 from collections import OrderedDict
@@ -21,16 +20,15 @@ from PySide6.QtWidgets import QWidget, QApplication, QLabel, QPushButton
 from PySide6.QtCore import Qt, Signal, QPoint, QSize, QTimer, QRectF, QThread
 from PySide6.QtGui import (
     QPixmap, QPainter, QColor, QGuiApplication, QWheelEvent,
-    QKeyEvent, QMovie, QImageReader, QPen, QTransform,
+    QKeyEvent, QMovie, QImageReader, QPen,
 )
 
 import qtawesome as qta
 
 from ui.theme import (
     BG_ACTIVE, BG_ELEVATED, BG_HOVER, BG_SECONDARY,
-    BORDER_DEFAULT, BORDER_STRONG, BORDER_SUBTLE,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_MUTED,
-    RADIUS_MD, RADIUS_SM, SPACING_SM, SPACING_MD,
+    BORDER_STRONG, BORDER_SUBTLE, TEXT_SECONDARY,
+    TEXT_TERTIARY, RADIUS_MD, RADIUS_SM, SPACING_SM,
 )
 
 # 缩放范围

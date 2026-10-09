@@ -100,7 +100,7 @@ class AIWorker(QThread):
 
     def _run_lightai_vision(self, api_key, base_url, model_id):
         """LightAI 视觉理解（异步提交 + 轮询）"""
-        from ui.lightai_client import LightAIClient, LightAIError, extract_text
+        from ui.lightai_client import LightAIClient, LightAIError
 
         if not self.base64_image:
             self.error.emit("视觉分析需要图片，请先截图")

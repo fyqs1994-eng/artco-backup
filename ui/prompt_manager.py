@@ -6,8 +6,7 @@ Prompt 管理模块 — Raycast 风格
 import os
 import qtawesome as qta
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QTextEdit,
-    QPushButton, QListWidget, QListWidgetItem, QFormLayout,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMenu, QMessageBox, QFrame,
 )
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -15,12 +14,10 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
     FONT_FAMILY,
-    BG_HOVER, BORDER_DEFAULT,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-    ACCENT_PRIMARY, ACCENT_SUBTLE,
-    RADIUS_SM, RADIUS_MD,
-    COLOR_ERROR,
-    MENU_STYLE,
+    BG_HOVER, TEXT_PRIMARY,
+    TEXT_SECONDARY, TEXT_TERTIARY, ACCENT_PRIMARY,
+    ACCENT_SUBTLE, RADIUS_SM,
+    COLOR_ERROR, MENU_STYLE,
 )
 
 _CONTENT_BG = "#FFFFFF"

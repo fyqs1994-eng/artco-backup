@@ -96,7 +96,6 @@ class PinWindow(QWidget):
     def _draw_shadow(self, painter, img_rect, min_side):
         """绘制平滑多层投影（圆角矩形，模拟自然光）"""
         from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QPainterPath, QPen, QBrush
 
         layers, y_offset, max_spread = self._get_shadow_params(min_side)
         radius = min(img_rect.width(), img_rect.height(), 4)  # 极小圆角

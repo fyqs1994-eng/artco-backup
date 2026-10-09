@@ -7,9 +7,9 @@
 import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QSizePolicy, QMessageBox
+    QStackedWidget, QMessageBox
 )
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, QSize
 
 from .archive import ArchiveGalleryPanel, ClipboardHistoryPanel, ClipboardHistoryManager
 

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QScrollArea
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QBuffer, QIODevice, QSize, QPropertyAnimation, QEasingCurve, Property, QPointF
-from PySide6.QtGui import QColor, QPixmap, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QColor, QPixmap, QGuiApplication, QPainter
 
 from database import add_record
 from ui.theme import FONT_FAMILY_MONO

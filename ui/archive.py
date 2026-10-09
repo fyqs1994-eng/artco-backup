@@ -8,21 +8,18 @@ import re
 import base64
 import os
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Any
 
 import qtawesome as qta
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QScrollArea, QMessageBox, QGridLayout, QApplication, QLineEdit,
-    QStackedWidget, QFrame
+    QTextEdit, QScrollArea, QMessageBox, QGridLayout, QApplication, QLineEdit
 )
 from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QUrl, QPoint, QBuffer, QIODevice, QTimer, QEvent
-from PySide6.QtGui import QPixmap, QGuiApplication, QDrag, QClipboard, QImage
+from PySide6.QtGui import QPixmap, QGuiApplication, QDrag
 
 from database import get_all_records, delete_record, get_image_full_path, get_all_prompts
 from ui.theme import FONT_FAMILY_MONO
-from .prompt_manager import PromptSelectMenu
 
 
 class ArchiveDetailDialog(QWidget):

@@ -10,8 +10,8 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import (
-    Qt, Signal, QTimer, QPoint, QSize, QPropertyAnimation,
-    QEasingCurve, QMimeData, QUrl
+    Qt, Signal, QTimer, QPoint, QPropertyAnimation, QEasingCurve,
+    QMimeData, QUrl
 )
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
@@ -20,9 +20,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QCursor, QPixmap, QDrag
 
 from ui.theme import (
-    BG_ELEVATED, BORDER_DEFAULT, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-    ACCENT_PRIMARY, ACCENT_SUBTLE, COLOR_ERROR, RADIUS_SM, RADIUS_MD, RADIUS_LG,
-    FONT_FAMILY, FONT_SIZE_SM, FONT_SIZE_MD, get_scrollbar_style
+    BG_ELEVATED, BORDER_DEFAULT, TEXT_PRIMARY, TEXT_TERTIARY, ACCENT_PRIMARY,
+    ACCENT_SUBTLE, RADIUS_SM, RADIUS_MD, RADIUS_LG, FONT_FAMILY, get_scrollbar_style
 )
 from ui.archive import ClipboardHistoryManager, ClipboardItem, _is_probably_image_file
 

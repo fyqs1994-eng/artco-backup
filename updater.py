@@ -5,13 +5,12 @@ Artco 自动更新模块
 
 import os
 import sys
-import json
 import hashlib
 import tempfile
 import subprocess
 import shutil
 
-from version import APP_VERSION, APP_NAME
+from version import APP_VERSION
 
 # ── 远程版本清单 URL ──────────────────────────────────────
 # 使用 GitHub raw 文件，发版时更新 releases/latest.json

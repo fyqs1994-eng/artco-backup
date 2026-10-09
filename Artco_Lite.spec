@@ -57,7 +57,6 @@ hiddenimports = [
     'ui.image_viewer',
     'ui.prompt_manager',
     'ui.settings',
-    'ui.sidebar',
     'ui.theme',
     'ui.workbench',
 ]

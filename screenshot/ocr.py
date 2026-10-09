@@ -181,7 +181,7 @@ async def _ocr_async(image_bytes: bytes, lang: str = "zh-Hans") -> str:
     from winsdk.windows.media.ocr import OcrEngine
     from winsdk.windows.globalization import Language
     from winsdk.windows.graphics.imaging import (
-        BitmapDecoder, SoftwareBitmap
+        BitmapDecoder
     )
     from winsdk.windows.storage.streams import (
         InMemoryRandomAccessStream, DataWriter

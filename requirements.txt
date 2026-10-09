@@ -3,7 +3,6 @@ google-genai
 pynput
 qtawesome
 psd-tools
-python-dotenv
 winsdk
 requests
 

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QPushButton, 
     QGraphicsDropShadowEffect, QScrollArea, QFileDialog, QMessageBox
 )
-from PySide6.QtCore import Qt, QSize, QPoint, QBuffer, QIODevice, QTimer, QRect
+from PySide6.QtCore import Qt, QPoint, QBuffer, QIODevice, QTimer, QRect
 from PySide6.QtGui import QColor, QPainter, QPixmap, QGuiApplication, QKeyEvent, QCursor, QFont, QFontMetrics, QPen
 
 from database import add_record

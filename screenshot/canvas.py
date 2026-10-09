@@ -6,7 +6,7 @@ import math
 
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QRect, QSize, Signal, QPoint, QPointF, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QKeyEvent, QFont, QPainterPath, QFontMetrics, QPolygonF
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QKeyEvent, QFont, QPainterPath, QFontMetrics, QPolygonF
 
 from .marks import MarkObject, NumberDot, RectMark, ArrowMark, FreehandMark, TextMark, FONT_NAME
 

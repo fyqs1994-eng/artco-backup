@@ -10,21 +10,51 @@ import uuid
 import weakref
 
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QFileDialog, QMessageBox
-from PySide6.QtCore import Qt, QRect, QSize, Signal, QBuffer, QIODevice, QTimer, QPoint, Property, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QGuiApplication, QPixmap, QFont, QKeyEvent, QCursor, QFontMetrics
+from PySide6.QtCore import Qt, QRect, QSize, QBuffer, QIODevice, QTimer, QPoint, Property, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QGuiApplication, QPixmap, QFont, QCursor, QFontMetrics
 
 from database import add_record
 from ui import PromptSelectMenu, SettingsDialog
 from .marks import FONT_NAME
-from .utils import parse_hotkey
 from .marks import MarkObject, RectMark, ArrowMark, FreehandMark, TextMark
 from .toolbar import ScreenshotToolbar, ScreenshotAICapsule
 from .pin import PinWindow
-from .todo_pin import TodoPinWindow, get_todo_board
+from .todo_pin import get_todo_board
 from .editor import EditorWindow
-from .cache import get_cached_hotkeys, invalidate_hotkey_cache
+from .cache import get_cached_hotkeys
 from .window_detect import WindowDetector, enumerate_windows
 from ui.theme import ACCENT_PRIMARY
+
+
+_CROSS_CURSOR_CACHE: dict = {}
+
+
+def _cross_cursor(dpr: float) -> QCursor:
+    """截图十字光标：白芯 + 黑描边，暗化遮罩和亮色选区里都清晰可见。
+
+    系统 CrossCursor 是细黑线，落在选区外 120 透明度的暗化遮罩上几乎看不见。
+    按屏幕 DPR 以设备像素绘制，线宽取整避免高分屏发虚；按 DPR 缓存。
+    """
+    dpr = max(1.0, float(dpr))
+    cur = _CROSS_CURSOR_CACHE.get(dpr)
+    if cur is not None:
+        return cur
+    w = max(1, round(dpr))          # 白芯线宽（设备像素）
+    b = w                           # 黑描边宽度（每侧）
+    arm = round(11 * dpr)           # 臂长（中心到端点）
+    size = 2 * arm + w
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.fillRect(QRect(0, arm - b, size, w + 2 * b), QColor(0, 0, 0, 230))
+    p.fillRect(QRect(arm - b, 0, w + 2 * b, size), QColor(0, 0, 0, 230))
+    p.fillRect(QRect(b, arm, size - 2 * b, w), QColor(255, 255, 255))
+    p.fillRect(QRect(arm, b, w, size - 2 * b), QColor(255, 255, 255))
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    cur = QCursor(pm)  # 热点默认取中心
+    _CROSS_CURSOR_CACHE[dpr] = cur
+    return cur
 
 
 def _overlay_caret_geometry(
@@ -83,7 +113,7 @@ class ScreenshotOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)  # 启用鼠标跟踪，支持悬停检测
         
@@ -664,11 +694,11 @@ class ScreenshotOverlay(QWidget):
         # 切换工具时结束当前文本输入
         self._finish_temp_text_editing()
         if tool == 'none':
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         elif tool == 'arrow':
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         elif tool == 'freehand':
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         elif tool == 'text':
             self.setCursor(Qt.CursorShape.IBeamCursor)
     
@@ -684,11 +714,9 @@ class ScreenshotOverlay(QWidget):
     
     def _release_keyboard_for_ime(self):
         """不再需要——已移除 grabKeyboard()，IME 可以正常工作。保留方法避免调用点报错。"""
-        pass
 
     def _restore_keyboard_grab_after_ime(self):
         """不再需要——已移除 grabKeyboard()。保留方法避免调用点报错。"""
-        pass
 
     def _start_temp_text_editing(self, pos: QPoint):
         """开始临时文本输入"""
@@ -1059,7 +1087,7 @@ class ScreenshotOverlay(QWidget):
         self.selection_rect = QRect()
         self.update_handles()
         self._hide_toolbar_and_capsule()
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         self._update_hover(self._cursor_local_pos())
         self.update()
 
@@ -1097,8 +1125,12 @@ class ScreenshotOverlay(QWidget):
 
     def enterEvent(self, event):
         # 多屏：鼠标进入哪块屏，键盘焦点就跟到哪块屏；
-        # 但别的屏已有选区/正在输入文字时不抢，保证 Ctrl+C、Esc 等仍作用于那块选区
+        # 但别的屏已有选区/正在输入文字时不抢，保证 Ctrl+C、Esc 等仍作用于那块选区。
+        # 本窗口已激活时不再 setFocus：输入法候选窗、AI 下拉框等顶层窗口消失后
+        # Windows 会补发一次 Enter，若此时抢焦点会把 AI 输入框等子控件的焦点夺走
         super().enterEvent(event)
+        if self.isActiveWindow():
+            return
         if self._group and (not self.selection_rect.isNull() or not self._sibling_busy()):
             self.activateWindow()
             self.setFocus()
@@ -1113,7 +1145,7 @@ class ScreenshotOverlay(QWidget):
             if self._mark_tool != 'none':
                 self._mark_tool = 'none'
                 self.toolbar.set_mark_tool('none')
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
                 return
             # 有选区（本屏或其它屏）时，右键先清选区；无选区时才退出截图
             if not self.selection_rect.isNull() or self._sibling_busy():
@@ -1323,7 +1355,7 @@ class ScreenshotOverlay(QWidget):
             self.setCursor(Qt.CursorShape.IBeamCursor)
             return
         if self._mark_tool != 'none':
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
             return
         
         # 检查是否在选区内
@@ -1332,7 +1364,7 @@ class ScreenshotOverlay(QWidget):
             return
         
         # 默认十字光标
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
     
     def _hide_toolbar_and_capsule(self):
         """隐藏工具栏、AI胶囊和下拉列表"""
@@ -1696,7 +1728,7 @@ class ScreenshotOverlay(QWidget):
             if self._mark_tool != 'none':
                 self._mark_tool = 'none'
                 self.toolbar.set_mark_tool('none')
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
             else:
                 # 延迟关闭，确保 keyRelease 仍由本窗口消费，不穿透到底层应用
                 QTimer.singleShot(0, self.close)
@@ -1843,7 +1875,7 @@ class ScreenshotOverlay(QWidget):
         if self._mark_tool == tool:
             self._mark_tool = 'none'
             self.toolbar.set_mark_tool('none')
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(_cross_cursor(self.target_screen.devicePixelRatio()))
         else:
             self._mark_tool = tool
             self.toolbar.set_mark_tool(tool)

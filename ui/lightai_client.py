@@ -12,7 +12,6 @@ LightAI（lightai_api_manager）是内部的 AI 能力网关，采用
 文档：LightAI API Manager - API 调用文档
 """
 
-import base64
 import time
 
 import requests

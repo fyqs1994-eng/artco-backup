@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QScrollArea, QSizePolicy, QApplication, QFrame,
 )
 from PySide6.QtCore import Qt, QPoint, QSize, Signal, QTimer, QThread
-from PySide6.QtGui import QPixmap, QPainter, QPainterPath, QColor
+from PySide6.QtGui import QPixmap, QPainter, QColor
 
 import qtawesome as qta
 

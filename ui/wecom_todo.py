@@ -13,7 +13,7 @@
 import json
 import urllib.request
 import urllib.error
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 
 from config import ai_config
 

@@ -95,8 +95,8 @@ from database import init_database, add_record
 from utils import hotkey_manager, convert_hotkey_format
 import updater
 from ui import (
-    AIWorker, AIResultBubble, AIImageResultWindow, SettingsDialog, WorkbenchWindow,
-    ClipboardHistoryManager, ClipboardFloatPanel, GenCanvas
+    AIWorker, AIResultBubble, SettingsDialog, WorkbenchWindow, ClipboardHistoryManager,
+    ClipboardFloatPanel, GenCanvas
 )
 from screenshot import ScreenshotOverlay, PinWindow
 from screenshot.capture import grab_screens, physical_to_local, physical_to_screen_local
@@ -1746,8 +1746,7 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
 
     def _show_update_dialog(self, version: str, changelog: str, info: dict):
         """显示更新对话框，让用户选择立即更新/稍后/跳过"""
-        from PySide6.QtWidgets import QMessageBox, QProgressDialog
-        from PySide6.QtCore import QThread, Signal
+        from PySide6.QtWidgets import QMessageBox
 
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Information)

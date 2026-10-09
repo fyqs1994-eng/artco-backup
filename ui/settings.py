@@ -6,7 +6,6 @@
 
 import sys
 import os
-import json
 import threading
 
 from PySide6.QtWidgets import (
@@ -15,8 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QScrollArea, QFrame,
     QComboBox, QMenu, QStackedWidget, QToolButton,
     QListWidget, QListWidgetItem, QSizePolicy,
-    QProgressDialog, QFileDialog, QSlider, QSpinBox, QGridLayout,
-    QGraphicsDropShadowEffect, QApplication, QTextEdit, QRadioButton, QCheckBox,
+    QProgressDialog, QFileDialog, QGridLayout, QGraphicsDropShadowEffect, QApplication,
 )
 from PySide6.QtCore import Signal, Qt, QPoint, QSize, QTimer, QThread
 from PySide6.QtGui import QKeySequence, QColor
@@ -28,16 +26,15 @@ from ui.fluent_controls import (
     RadioButton, CheckBox, ComboBox, EditableComboBox,
 )
 
-from config import AI_MODELS, ai_config, model_classifier, ps_config, appearance_config, PRESET_SCHEMES
+from config import AI_MODELS, ai_config, model_classifier, ps_config, appearance_config
 from utils import hotkey_manager
 from database import get_all_prompts, add_prompt, update_prompt, delete_prompt
 from ui.theme import (
     FONT_FAMILY,
     BG_HOVER, BORDER_DEFAULT,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-    ACCENT_PRIMARY, ACCENT_SUBTLE,
-    RADIUS_SM, RADIUS_MD,
-    COLOR_ERROR,
+    TEXT_PRIMARY, TEXT_TERTIARY, ACCENT_PRIMARY,
+    ACCENT_SUBTLE, RADIUS_SM,
+    RADIUS_MD, COLOR_ERROR,
     MENU_STYLE,
 )
 
@@ -1516,7 +1513,6 @@ class SettingsDialog(QDialog):
         服务商的模型 ID（例如切到 Google 后仍带着 LightAI 的模型 ID），
         导致实际调用时模型与服务商不匹配。
         """
-        from config import AI_PROVIDERS
 
         ai_config.set_current_provider_selected(provider_id)
         self._apply_provider_default_models(provider_id)
