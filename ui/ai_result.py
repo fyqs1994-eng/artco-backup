@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal, QTimer, QBuffer, QIODevice, QSize, QPrope
 from PySide6.QtGui import QColor, QPixmap, QGuiApplication, QPainter
 
 from database import add_record
-from ui.theme import FONT_FAMILY_MONO
+from ui.theme import FONT_FAMILY_MONO, COLOR_ERROR
 
 
 class AIImageResultWindow(QWidget):
@@ -453,6 +453,7 @@ class AIResultBubble(QWidget):
     pin_image_requested = Signal(QPixmap)  # 请求贴图
     followup_requested = Signal(str)  # 追问信号（传递用户输入的文本）
     open_canvas_requested = Signal(QPixmap, str)  # 请求打开 AI 工作台（图 + prompt）
+    abort_requested = Signal()  # 等待中点击终止
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -576,7 +577,7 @@ class AIResultBubble(QWidget):
         self.btn_send.setFixedSize(32, 32)
         self.btn_send.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_send.setToolTip("发送 (Enter)")
-        self.btn_send.clicked.connect(self._on_send_followup)
+        self.btn_send.clicked.connect(self._on_send_clicked)
         input_layout.addWidget(self.btn_send)
         
         layout.addWidget(self.input_container)
@@ -669,6 +670,10 @@ class AIResultBubble(QWidget):
             QPushButton#btn_send:disabled {
                 background: #ccc;
             }
+        """ + f"""
+            QPushButton#btn_send[stopMode="true"] {{
+                background: {COLOR_ERROR};
+            }}
         """)
         
         shadow = QGraphicsDropShadowEffect(self)
@@ -772,6 +777,21 @@ class AIResultBubble(QWidget):
         else:
             self._enter_hint.hide()
     
+    def _on_send_clicked(self):
+        """发送按钮：空闲时发送追问，等待中则终止"""
+        if self._is_loading:
+            self.abort_requested.emit()
+        else:
+            self._on_send_followup()
+
+    def _set_stop_mode(self, on: bool):
+        """等待 AI 时发送按钮切换为终止按钮（图标 + 提示，不只靠颜色区分）"""
+        self.btn_send.setIcon(qta.icon('mdi6.stop' if on else 'mdi6.send', color='#fff'))
+        self.btn_send.setToolTip("终止" if on else "发送 (Enter)")
+        self.btn_send.setProperty("stopMode", on)
+        self.btn_send.style().unpolish(self.btn_send)
+        self.btn_send.style().polish(self.btn_send)
+
     def _on_send_followup(self):
         """发送追问"""
         text = self.input_field.text().strip()
@@ -787,7 +807,7 @@ class AIResultBubble(QWidget):
         
         # 显示加载状态
         self._is_loading = True
-        self.btn_send.setEnabled(False)
+        self._set_stop_mode(True)
         self.input_field.setPlaceholderText("AI 思考中...")
         self.input_field.setReadOnly(True)
         
@@ -820,7 +840,7 @@ class AIResultBubble(QWidget):
         self._remove_thinking_bubble()
         self.full_text = text
         self._is_loading = False
-        self.btn_send.setEnabled(True)
+        self._set_stop_mode(False)
         self.input_field.setPlaceholderText("追问...")
         self.input_field.setReadOnly(False)
         self.input_field.setFocus()
@@ -831,7 +851,7 @@ class AIResultBubble(QWidget):
         """AI 处理被用户终止时恢复输入状态"""
         self._remove_thinking_bubble()
         self._is_loading = False
-        self.btn_send.setEnabled(True)
+        self._set_stop_mode(False)
         self.input_field.setPlaceholderText("追问...")
         self.input_field.setReadOnly(False)
         if self._is_chat_mode:
@@ -841,7 +861,7 @@ class AIResultBubble(QWidget):
         """追加 AI 生成的图片到聊天列表（由外部调用）"""
         self._remove_thinking_bubble()
         self._is_loading = False
-        self.btn_send.setEnabled(True)
+        self._set_stop_mode(False)
         self.input_field.setPlaceholderText("继续描述修改需求...")
         self.input_field.setReadOnly(False)
         self.input_field.setFocus()
@@ -863,7 +883,7 @@ class AIResultBubble(QWidget):
         """显示追问错误"""
         self._remove_thinking_bubble()
         self._is_loading = False
-        self.btn_send.setEnabled(True)
+        self._set_stop_mode(False)
         self.input_field.setPlaceholderText("追问...")
         self.input_field.setReadOnly(False)
         self.input_field.setFocus()

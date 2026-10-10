@@ -19,7 +19,11 @@ from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QUrl, QPoint, QBuffer, 
 from PySide6.QtGui import QPixmap, QGuiApplication, QDrag
 
 from database import get_all_records, delete_record, get_image_full_path, get_all_prompts
-from ui.theme import FONT_FAMILY_MONO
+from ui.theme import (
+    FONT_FAMILY_MONO, FONT_SIZE_XS, BG_ELEVATED, BG_SECONDARY, BORDER_DEFAULT,
+    ACCENT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, RADIUS_MD, COLOR_ERROR,
+)
+from ui.image_loader import loader as image_loader, fit_pixmap
 
 
 class ArchiveDetailDialog(QWidget):
@@ -63,10 +67,11 @@ class ArchiveDetailDialog(QWidget):
         }
     """
     
-    def __init__(self, record: dict, parent=None):
+    def __init__(self, record: dict, parent=None, placeholder: Optional[QPixmap] = None):
         super().__init__(parent)
         self.record = record
-        self._pixmap = None  # 缓存原图
+        self._pixmap = None  # 显示用的缩放图（后台解码到达后才有）
+        self._placeholder = placeholder  # 卡片缩略图，清晰图到达前先垫着
         self._selected_prompt_type = "text"  # 当前选中的模式
         self._prompts = self._load_prompts()  # 加载模板
         self.setWindowTitle("归档详情")
@@ -121,16 +126,15 @@ class ArchiveDetailDialog(QWidget):
             from PySide6.QtGui import QImageReader
             reader = QImageReader(str(image_path))
             reader.setAutoTransform(True)
-            # 先按目标显示尺寸约束解码，读取器会自动保持宽高比
+            # 只读文件头拿尺寸（不解码），先把显示区域定下来，图片到达后布局不跳
             origin = reader.size()
             if origin.isValid() and origin.width() > 0 and origin.height() > 0:
-                scaled_size = origin.scaled(
+                self._display_size = origin.scaled(
                     QSize(760, 400), Qt.AspectRatioMode.KeepAspectRatio
                 )
-                reader.setScaledSize(scaled_size)
-            scaled = QPixmap.fromImage(reader.read())
-            # 详情页仅持有缩放后的显示图；原图不常驻内存（见 _get_full_pixmap）
-            self._pixmap = scaled
+            else:
+                self._display_size = QSize(760, 400)
+            del reader
             
             # 图片容器
             image_container = QWidget()
@@ -140,8 +144,17 @@ class ArchiveDetailDialog(QWidget):
             image_container_layout.setContentsMargins(10, 10, 10, 10)
             
             image_label = QLabel()
-            image_label.setPixmap(scaled)
+            image_label.setMinimumSize(self._display_size)
             image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._image_label = image_label
+            dpr = self.devicePixelRatioF()
+            if self._placeholder is not None and not self._placeholder.isNull():
+                image_label.setPixmap(fit_pixmap(self._placeholder.toImage(), self._display_size, dpr))
+            self._placeholder = None
+            # 按屏幕 DPR 解码，高分屏下详情图不发虚
+            decode_box = QSize(round(self._display_size.width() * dpr),
+                               round(self._display_size.height() * dpr))
+            image_loader().request_scaled(self._image_path, decode_box, self, self._on_display_image)
             image_container_layout.addWidget(image_label)
             
             # 悬浮复制图片按钮（右上角）
@@ -351,12 +364,25 @@ class ArchiveDetailDialog(QWidget):
     def _copy_text(self):
         QGuiApplication.clipboard().setText(self.record.get("ai_text", ""))
     
+    def _on_display_image(self, image):
+        """后台解码的详情图到达，替换掉垫底的缩略图"""
+        if image.isNull() or not hasattr(self, '_image_label'):
+            return
+        self._pixmap = fit_pixmap(image, self._display_size, self.devicePixelRatioF())
+        self._image_label.setPixmap(self._pixmap)
+
     def _copy_image(self):
-        # 复制需要原图质量，这里按需从磁盘加载，不复用详情页的缩放图
-        # （详情页的 self._pixmap 现在只为显示而解码到 760×400）
-        pixmap = self._get_full_pixmap()
-        if pixmap:
-            QGuiApplication.clipboard().setPixmap(pixmap)
+        # 复制需要原图质量；大图解码可能上百毫秒，放到后台线程，期间按钮置灰
+        path = getattr(self, '_image_path', None)
+        if not path or not os.path.exists(path):
+            return
+        self.btn_copy_image.setEnabled(False)
+        image_loader().request_full(path, self, self._on_full_image_for_copy)
+
+    def _on_full_image_for_copy(self, image):
+        self.btn_copy_image.setEnabled(True)
+        if not image.isNull():
+            QGuiApplication.clipboard().setImage(image)
 
     def _get_full_pixmap(self) -> Optional[QPixmap]:
         """按需从磁盘加载原图。
@@ -368,7 +394,8 @@ class ArchiveDetailDialog(QWidget):
         path = getattr(self, '_image_path', None)
         if not path or not os.path.exists(path):
             return None
-        pixmap = QPixmap(path)
+        from ui.image_loader import load_full_image
+        pixmap = QPixmap.fromImage(load_full_image(path))  # 超大图按解码上限兜底，不再静默失败
         return pixmap if not pixmap.isNull() else None
     
     def resizeEvent(self, event):
@@ -662,13 +689,10 @@ class ArchiveCard(QWidget):
         self.thumb_label.setFixedSize(160, 130)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setObjectName("thumb_label")
-        self.thumb_label.setStyleSheet("background: #f5f5f5;")
         
         if self._image_path:
-            # 分散延迟加载，避免同时加载
-            import random
-            delay = random.randint(50, 300)
-            QTimer.singleShot(delay, self._lazy_load_thumb)
+            # 后台解码 + 磁盘缓存，界面线程不碰原图
+            image_loader().request_thumb(self._image_path, self, self._on_thumb_loaded)
         else:
             self.thumb_label.setText("图片缺失")
         
@@ -736,32 +760,33 @@ class ArchiveCard(QWidget):
         time_label.setFixedHeight(30)
         layout.addWidget(time_label)
         
-        self.setStyleSheet("""
-            QWidget#archive_card {
-                background-color: #fff;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-            }
-            QWidget#archive_card:hover {
-                border: 1px solid #0078d7;
-            }
-            QLabel#thumb_label {
-                background-color: #f5f5f5;
-                border-radius: 8px 8px 0 0;
-            }
-            QLabel#time_label {
-                color: #666;
-                font-size: 11px;
+        self.setStyleSheet(f"""
+            QWidget#archive_card {{
+                background-color: {BG_ELEVATED};
+                border: 1px solid {BORDER_DEFAULT};
+                border-radius: {RADIUS_MD}px;
+            }}
+            QWidget#archive_card:hover {{
+                border: 1px solid {ACCENT_PRIMARY};
+            }}
+            QLabel#thumb_label {{
+                background-color: {BG_SECONDARY};
+                color: {TEXT_TERTIARY};
+                border-radius: {RADIUS_MD}px {RADIUS_MD}px 0 0;
+            }}
+            QLabel#time_label {{
+                color: {TEXT_SECONDARY};
+                font-size: {FONT_SIZE_XS}px;
                 background-color: transparent;
-            }
-            QPushButton#btn_delete_overlay {
+            }}
+            QPushButton#btn_delete_overlay {{
                 background-color: rgba(0, 0, 0, 0.5);
                 border: none;
                 border-radius: 12px;
-            }
-            QPushButton#btn_delete_overlay:hover {
-                background-color: rgba(239, 68, 68, 0.9);
-            }
+            }}
+            QPushButton#btn_delete_overlay:hover {{
+                background-color: {COLOR_ERROR};
+            }}
         """)
     
     def enterEvent(self, event):
@@ -772,23 +797,12 @@ class ArchiveCard(QWidget):
         self.btn_delete.hide()
         super().leaveEvent(event)
     
-    def _lazy_load_thumb(self):
-        """延迟加载缩略图 - 使用 QImageReader 高效加载"""
-        if not self._image_path:
+    def _on_thumb_loaded(self, image):
+        """后台缩略图到达：按当前屏幕 DPR 等比放进 160×130（不再拉伸变形）"""
+        if image.isNull():
+            self.thumb_label.setText("无法预览")
             return
-        try:
-            from PySide6.QtGui import QImageReader
-            reader = QImageReader(self._image_path)
-            if reader.canRead():
-                # 直接读取缩放后的尺寸，避免加载原图
-                reader.setScaledSize(QSize(160, 130))
-                image = reader.read()
-                if not image.isNull():
-                    pixmap = QPixmap.fromImage(image)
-                    self.thumb_label.setPixmap(pixmap)
-                    self.thumb_label.setStyleSheet("")
-        except Exception:
-            pass
+        self.thumb_label.setPixmap(fit_pixmap(image, QSize(160, 130), self.devicePixelRatioF()))
     
     def _request_delete(self):
         self.delete_requested.emit(self.record.get("id", ""))
@@ -822,9 +836,11 @@ class ArchiveCard(QWidget):
             # 设置拖拽预览图
             pixmap = self.thumb_label.pixmap()
             if pixmap:
-                scaled = pixmap.scaled(80, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                d = pixmap.devicePixelRatio()
+                scaled = pixmap.scaled(int(80 * d), int(65 * d), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                scaled.setDevicePixelRatio(d)
                 drag.setPixmap(scaled)
-                drag.setHotSpot(QPoint(scaled.width() // 2, scaled.height() // 2))
+                drag.setHotSpot(QPoint(int(scaled.width() / d) // 2, int(scaled.height() / d) // 2))
             
             drag.exec(Qt.DropAction.CopyAction)
         
@@ -1834,6 +1850,7 @@ class ArchiveGalleryPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cards = []
+        self._cards_by_id = {}  # record_id -> ArchiveCard，跨刷新复用
         self.init_ui()
         self.load_records()
     
@@ -1878,38 +1895,38 @@ class ArchiveGalleryPanel(QWidget):
         layout.addWidget(self.empty_label)
     
     def load_records(self):
-        """加载/刷新归档记录"""
-        for card in self.cards:
-            card.deleteLater()
-        self.cards.clear()
-        
-        while self.grid_layout.count() > 0:
-            item = self.grid_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        
+        """同步归档记录：只为新记录建卡片、只移除已删除的卡片，已有卡片和缩略图原样复用"""
         records = get_all_records()
-        
-        if not records:
-            self.scroll_area.hide()
-            self.empty_label.show()
-            return
-        
-        self.scroll_area.show()
-        self.empty_label.hide()
-        
+        alive = {r["id"] for r in records}
+        for rid in [rid for rid in self._cards_by_id if rid not in alive]:
+            card = self._cards_by_id.pop(rid)
+            card.hide()
+            card.deleteLater()
+
+        # 只把控件从网格里摘下来重新排位，不销毁
+        while self.grid_layout.count() > 0:
+            self.grid_layout.takeAt(0)
+
+        self.cards = []
         for i, record in enumerate(records):
-            row = i // self.COLUMNS
-            col = i % self.COLUMNS
-            
-            card = ArchiveCard(record)
-            card.clicked.connect(self._show_detail)
-            card.delete_requested.connect(self._delete_record)
-            self.grid_layout.addWidget(card, row, col)
+            card = self._cards_by_id.get(record["id"])
+            if card is None:
+                card = ArchiveCard(record)
+                card.clicked.connect(self._show_detail)
+                card.delete_requested.connect(self._delete_record)
+                self._cards_by_id[record["id"]] = card
+            self.grid_layout.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
             self.cards.append(card)
-    
+
+        has_records = bool(records)
+        self.scroll_area.setVisible(has_records)
+        self.empty_label.setVisible(not has_records)
+
     def _show_detail(self, record: dict):
-        dialog = ArchiveDetailDialog(record, self)
+        # 把卡片上已有的缩略图交给详情页垫底，清晰图后台解码好再替换
+        card = self._cards_by_id.get(record.get("id"))
+        placeholder = card.thumb_label.pixmap() if card else None
+        dialog = ArchiveDetailDialog(record, self, placeholder=placeholder)
         dialog.show()
     
     def _delete_record(self, record_id: str):

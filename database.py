@@ -270,6 +270,12 @@ def delete_record(record_id: str) -> bool:
             full_image_path.unlink()
         except Exception:
             pass
+    # 顺带删除缩略图缓存（见 ui/image_loader.thumb_cache_path）
+    thumb_path = IMAGES_DIR / "thumbs" / (Path(image_path).stem + ".png")
+    try:
+        thumb_path.unlink(missing_ok=True)
+    except OSError:
+        pass
     
     return True
 

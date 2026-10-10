@@ -46,6 +46,8 @@ class LightAIError(Exception):
 class LightAIClient:
     """LightAI 网关客户端（异步任务协议）"""
 
+    cancel_check = None  # 可选：返回 True 时轮询立即退出
+
     def __init__(self, api_key: str, base_url: str = None,
                  user_id: str = None, company: str = "tencent-formal",
                  user_type: str = "internal"):
@@ -181,6 +183,8 @@ class LightAIClient:
         """轮询任务直至终态，返回完整任务结果"""
         deadline = time.time() + timeout
         while True:
+            if self.cancel_check and self.cancel_check():
+                raise LightAIError("任务已终止")
             data = self.get_task(task_id)
             status = data.get("status")
 

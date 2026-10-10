@@ -39,7 +39,7 @@ from ui.theme import (
     BG_HOVER, BG_ACTIVE, BORDER_SUBTLE, BORDER_DEFAULT, BORDER_STRONG,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
     ACCENT_PRIMARY, ACCENT_HOVER, ACCENT_PRESSED, ACCENT_SUBTLE,
-    ACCENT_BORDER, RADIUS_SM, RADIUS_MD, RADIUS_LG, RADIUS_XL,
+    ACCENT_BORDER, RADIUS_SM, RADIUS_MD, RADIUS_LG, RADIUS_XL, COLOR_ERROR,
     SPACING_XS, SPACING_SM,
     SPACING_MD, SPACING_LG, SPACING_XL, ICON_MD,
     BTN_SIZE, ICON_DEFAULT, ICON_ACCENT, get_scrollbar_style,
@@ -386,6 +386,16 @@ class GenCanvas(QWidget):
             #genGenerateBtn:pressed { background: """ + ACCENT_PRESSED + """; }
             #genGenerateBtn:disabled { background: """ + ACCENT_BORDER + """; }
 
+            #genStopBtn {
+                background: """ + BG_PRIMARY + """;
+                color: """ + TEXT_SECONDARY + """;
+                border: 1px solid """ + BORDER_DEFAULT + """;
+                border-radius: """ + str(RADIUS_MD) + """px;
+                padding: 0 14px;
+                font-size: """ + str(FONT_SIZE_MD) + """px;
+            }
+            #genStopBtn:hover { color: """ + COLOR_ERROR + """; border-color: """ + COLOR_ERROR + """; }
+
             #genBaseHint {
                 background: rgba(17, 24, 39, 0.55);
                 color: #ffffff;
@@ -523,6 +533,14 @@ class GenCanvas(QWidget):
         self._thinking.setFixedWidth(68)
         self._thinking.hide()
         row.addWidget(self._thinking)
+
+        self.btn_stop = QPushButton("停止")
+        self.btn_stop.setObjectName("genStopBtn")
+        self.btn_stop.setFixedHeight(32)
+        self.btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop.clicked.connect(self._on_stop)
+        self.btn_stop.hide()
+        row.addWidget(self.btn_stop)
 
         input_area.addLayout(row)
 
@@ -695,9 +713,23 @@ class GenCanvas(QWidget):
         if working:
             self.btn_generate.hide()
             self._thinking.show()
+            self.btn_stop.show()
         else:
             self._thinking.hide()
+            self.btn_stop.hide()
             self.btn_generate.show()
+
+    def _on_stop(self):
+        """终止当前生成，保留输入内容方便重试"""
+        if self._worker:
+            for sig in (self._worker.finished_image, self._worker.error, self._worker.finished):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            self._worker.abort()
+        self._set_working(False)
+        self.input_field.setFocus()
 
     def _on_generated(self, image_path: str):
         pixmap = QPixmap(image_path)

@@ -90,6 +90,14 @@ class WorkbenchWindow(QWidget):
         
         # 默认选中归档
         self._switch_panel("archive")
+        self._shown_once = False
+
+    def showEvent(self, event):
+        """窗口被复用：再次显示时增量同步归档（只补新记录、去掉已删除的）"""
+        super().showEvent(event)
+        if self._shown_once:
+            self.archive_panel.load_records()
+        self._shown_once = True
     
     def init_ui(self):
         self.setObjectName("workbench_window")

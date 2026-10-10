@@ -8,6 +8,9 @@ import base64
 
 from PySide6.QtCore import QThread, Signal
 
+# 被终止但仍在后台跑完网络请求的线程：保留引用，避免 QThread 运行中被回收导致崩溃
+_detached_workers = []
+
 from config import DEFAULT_PROMPT, ai_config
 
 
@@ -22,6 +25,21 @@ class AIWorker(QThread):
         self.base64_image = base64_image
         self._qimage = qimage  # 若提供，则在子线程中完成 PNG→base64 编码
         self.prompt = prompt or DEFAULT_PROMPT
+        self._aborted = False
+
+    def abort(self):
+        """终止任务：之后不再发出任何结果信号。
+
+        阻塞中的网络请求无法强行打断，线程会在后台自行结束，结果直接丢弃。
+        """
+        self._aborted = True
+        _detached_workers[:] = [w for w in _detached_workers if w.isRunning()]
+        if self.isRunning():
+            _detached_workers.append(self)
+
+    def _emit(self, signal, value):
+        if not self._aborted:
+            signal.emit(value)
 
 
 
@@ -44,7 +62,7 @@ class AIWorker(QThread):
             else:
                 self._run_vision_analysis()
         except Exception as e:
-            self.error.emit(f"请求失败: {str(e)}")
+            self._emit(self.error, f"请求失败: {str(e)}")
     
     def _run_vision_analysis(self):
         """视觉分析模式"""
@@ -52,7 +70,7 @@ class AIWorker(QThread):
         model_id = ai_config.get_current_model()
 
         if not provider_id:
-            self.error.emit("请先在设置中添加 AI 服务商")
+            self._emit(self.error, "请先在设置中添加 AI 服务商")
             return
 
         # 兜底：模型不属于当前服务商时，回退到该服务商的默认模型
@@ -60,14 +78,14 @@ class AIWorker(QThread):
         model_id = self._resolve_model_for_provider(provider_id, model_id, "vision")
 
         if not model_id:
-            self.error.emit("模型配置错误，请重新验证 API Key")
+            self._emit(self.error, "模型配置错误，请重新验证 API Key")
             return
 
         api_key = ai_config.get_api_key(provider_id)
         base_url = ai_config.get_api_base_url(provider_id)
 
         if not api_key:
-            self.error.emit(f"请先在设置中配置 {provider_id} 的 API Key")
+            self._emit(self.error, f"请先在设置中配置 {provider_id} 的 API Key")
             return
 
         # 根据服务商使用不同的 SDK
@@ -103,17 +121,18 @@ class AIWorker(QThread):
         from ui.lightai_client import LightAIClient, LightAIError
 
         if not self.base64_image:
-            self.error.emit("视觉分析需要图片，请先截图")
+            self._emit(self.error, "视觉分析需要图片，请先截图")
             return
 
         try:
             client = LightAIClient.from_config(api_key, base_url or None)
+            client.cancel_check = lambda: self._aborted
             text = client.vision_analyze(model_id, self.prompt, self.base64_image)
-            self.finished.emit(text)
+            self._emit(self.finished, text)
         except LightAIError as e:
-            self.error.emit(str(e))
+            self._emit(self.error, str(e))
         except Exception as e:
-            self.error.emit(f"LightAI 请求失败: {str(e)}")
+            self._emit(self.error, f"LightAI 请求失败: {str(e)}")
 
 
 
@@ -127,7 +146,7 @@ class AIWorker(QThread):
         
         # 构建 Google SDK 要求的模型名格式 (添加 models/ 前缀)
         if not model_id:
-            self.error.emit("模型 ID 为空，请重新验证 API Key")
+            self._emit(self.error, "模型 ID 为空，请重新验证 API Key")
             return
         
         if not model_id.startswith("models/"):
@@ -145,7 +164,7 @@ class AIWorker(QThread):
             contents=contents,
         )
 
-        self.finished.emit(response.text)
+        self._emit(self.finished, response.text)
 
     def _run_openai_compatible_vision(self, provider_id, api_key, base_url, model_id):
         """OpenAI 兼容协议（OpenAI、Anthropic 等）"""
@@ -181,7 +200,7 @@ class AIWorker(QThread):
             ],
             max_tokens=4096
         )
-        self.finished.emit(response.choices[0].message.content)
+        self._emit(self.finished, response.choices[0].message.content)
 
     def _run_image_generation(self):
         """图像生成模式 - 根据 provider 类型路由到对应 SDK"""
@@ -189,19 +208,19 @@ class AIWorker(QThread):
         model_id = ai_config.get_image_gen_model()
 
         if not provider_id:
-            self.error.emit("请先在设置中配置图像生成服务商")
+            self._emit(self.error, "请先在设置中配置图像生成服务商")
             return
 
         # 兜底：模型不属于当前服务商时，回退到该服务商的默认模型
         model_id = self._resolve_model_for_provider(provider_id, model_id, "image_gen")
 
         if not model_id:
-            self.error.emit("图像生成模型配置错误，请重新验证 API Key")
+            self._emit(self.error, "图像生成模型配置错误，请重新验证 API Key")
             return
 
         api_key = ai_config.get_api_key(provider_id)
         if not api_key:
-            self.error.emit(f"请先在设置中配置 {provider_id} 的 API Key")
+            self._emit(self.error, f"请先在设置中配置 {provider_id} 的 API Key")
             return
 
         # 根据 provider 类型路由
@@ -225,6 +244,7 @@ class AIWorker(QThread):
 
         try:
             client = LightAIClient.from_config(api_key, base_url or None)
+            client.cancel_check = lambda: self._aborted
             result = client.generate_image(
                 model_id, self.prompt, image_base64=self.base64_image
             )
@@ -248,12 +268,12 @@ class AIWorker(QThread):
                 img = Image.open(io.BytesIO(resp.content))
                 img.save(image_path, "PNG")
 
-            self.finished_image.emit(image_path)
+            self._emit(self.finished_image, image_path)
 
         except LightAIError as e:
-            self.error.emit(str(e))
+            self._emit(self.error, str(e))
         except Exception as e:
-            self.error.emit(f"LightAI 生图失败: {str(e)}")
+            self._emit(self.error, f"LightAI 生图失败: {str(e)}")
 
     def _run_google_image_generation(self, api_key, model_id):
         """使用 Google Gemini SDK 生成图像"""
@@ -266,7 +286,7 @@ class AIWorker(QThread):
         from PIL import Image
 
         if not api_key:
-            self.error.emit("图像生成需要配置 Google API Key")
+            self._emit(self.error, "图像生成需要配置 Google API Key")
             return
 
         client = genai.Client(api_key=api_key)
@@ -320,11 +340,11 @@ class AIWorker(QThread):
                                 generated_image = Image.open(io.BytesIO(image_data))
                                 break
             else:
-                self.error.emit(f"图像生成失败：API返回空结果")
+                self._emit(self.error, f"图像生成失败：API返回空结果")
                 return
 
             if not generated_image:
-                self.error.emit("图像生成失败：模型未返回图片数据")
+                self._emit(self.error, "图像生成失败：模型未返回图片数据")
                 return
 
             # 保存生成的图片
@@ -336,10 +356,10 @@ class AIWorker(QThread):
 
             generated_image.save(image_path, "PNG")
 
-            self.finished_image.emit(image_path)
+            self._emit(self.finished_image, image_path)
 
         except Exception as e:
-            self.error.emit(f"图像生成失败: {str(e)}")
+            self._emit(self.error, f"图像生成失败: {str(e)}")
             return
 
     def _run_openai_compatible_image_generation(self, api_key, base_url, model_id):
@@ -425,7 +445,7 @@ class AIWorker(QThread):
                         image_url = url_match.group(1)
 
                 if not image_url:
-                    self.error.emit(f"图像生成失败：模型未返回图片数据。回复内容: {content[:200]}")
+                    self._emit(self.error, f"图像生成失败：模型未返回图片数据。回复内容: {content[:200]}")
                     return
 
             # 下载或解码图片
@@ -449,8 +469,8 @@ class AIWorker(QThread):
                 img = Image.open(io.BytesIO(resp.content))
                 img.save(image_path, "PNG")
 
-            self.finished_image.emit(image_path)
+            self._emit(self.finished_image, image_path)
 
         except Exception as e:
-            self.error.emit(f"图像生成失败: {str(e)}")
+            self._emit(self.error, f"图像生成失败: {str(e)}")
             return

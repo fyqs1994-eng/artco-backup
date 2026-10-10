@@ -2083,19 +2083,18 @@ class ArchivePickerDialog(QWidget):
         if not image_path.exists():
             return None
         
-        pixmap = QPixmap(str(image_path))
-        if pixmap.isNull():
-            return None
-        
-        thumb = pixmap.scaled(
-            110, 90,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
+        # 以前这里同步解码每一张原图并全部常驻内存；改为后台读缩略图缓存，原图只在选中时解码
+        from ui.image_loader import loader as image_loader, fit_pixmap
+        path = str(image_path)
         
         card = QPushButton()
         card.setFixedSize(116, 96)
-        card.setIcon(thumb)
+        
+        def on_thumb(img, btn=card):
+            if not img.isNull():
+                btn.setIcon(fit_pixmap(img, QSize(110, 90), btn.devicePixelRatioF()))
+        
+        image_loader().request_thumb(path, card, on_thumb)
         card.setIconSize(QSize(110, 90))
         card.setCursor(Qt.CursorShape.PointingHandCursor)
         card.setToolTip(record.get("timestamp", "")[:16])
@@ -2111,10 +2110,15 @@ class ArchivePickerDialog(QWidget):
                 background: #fff5f5;
             }
         """)
-        card.clicked.connect(lambda checked, p=pixmap: self._select(p))
+        card.clicked.connect(lambda checked, p=path: self._select(p))
         return card
     
-    def _select(self, pixmap: QPixmap):
+    def _select(self, path: str):
+        from ui.image_loader import load_full_image
+        image = load_full_image(path)
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
         self.selected_pixmap = pixmap
         self._dialog.accept()
     

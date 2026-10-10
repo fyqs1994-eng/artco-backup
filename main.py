@@ -6,6 +6,7 @@ Artco - AI 截图工具
 import sys
 import os
 import base64
+import time
 import threading
 import ctypes
 import weakref
@@ -89,7 +90,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPixmap, QPaint
 
 from version import APP_VERSION, APP_NAME
 from config import ai_config, get_bundle_dir, appearance_config
-from ui.theme import MENU_STYLE
+from ui.theme import MENU_STYLE, COLOR_ERROR, RADIUS_MD, ICON_LG, ACCENT_PRIMARY, COLOR_SUCCESS
 
 from database import init_database, add_record
 from utils import hotkey_manager, convert_hotkey_format
@@ -318,6 +319,8 @@ class CapsuleWidget(QWidget):
 
     
     def start_ai_processing(self, base64_data: str, prompt: str = None, prompt_type: str = "text"):
+        if self._is_processing:
+            self._abort_ai_processing()
         self._is_processing = True
 
         self._current_image_data = base64.b64decode(base64_data)
@@ -425,6 +428,7 @@ class CapsuleWidget(QWidget):
         self.ai_bubble.closed.connect(self._on_bubble_closed)
         self.ai_bubble.pin_image_requested.connect(self._pin_generated_image)
         self.ai_bubble.followup_requested.connect(self._on_followup_requested)
+        self.ai_bubble.abort_requested.connect(self._abort_ai_processing)
         self.ai_bubble.open_canvas_requested.connect(self._on_open_canvas_from_bubble)
         
         capsule_pos = self.pos()
@@ -533,29 +537,33 @@ class CapsuleWidget(QWidget):
         self.breathing_animation.stop()
         self.btn_screenshot.setEnabled(True)
         self.container.set_processing(False)  # 停止虹光
-        
-        # 断开所有 clicked 连接，重新绑定截图功能
-        try:
-            self.btn_screenshot.clicked.disconnect()
-        except (RuntimeError, RuntimeWarning):
-            pass
-        self.btn_screenshot.clicked.connect(self.start_screenshot)
-        self.btn_screenshot.setToolTip("截图 (快捷键)")
+        self._set_handle_abortable(False)
         
         self.container.setStyleSheet(self._normal_style)
     
     def _enable_abort_button(self):
-        """AI 工作中，截图按钮变为终止按钮"""
+        """AI 工作中，拖拽手柄变为终止按钮（单击终止，按住拖动仍可移动）"""
         if not self._is_processing:
             return
-        self.btn_screenshot.setEnabled(True)
-        self.btn_screenshot.setToolTip("点击终止 AI 处理")
-        # 临时断开所有连接，绑定终止功能
-        try:
-            self.btn_screenshot.clicked.disconnect()
-        except (RuntimeError, RuntimeWarning):
-            pass
-        self.btn_screenshot.clicked.connect(self._abort_ai_processing)
+        self._set_handle_abortable(True)
+
+    def _set_handle_abortable(self, on: bool):
+        """切换拖拽手柄的形态：普通拖动手柄 / 处理中的终止按钮"""
+        if getattr(self, '_handle_abortable', False) == on:
+            return
+        self._handle_abortable = on
+        h = self.drag_handle
+        if on:
+            h.setPixmap(self._handle_stop_pixmap)
+            h.setCursor(Qt.CursorShape.PointingHandCursor)
+            h.setToolTip("点击终止 AI 处理（按住可拖动）")
+        else:
+            h.setPixmap(self._handle_drag_pixmap)
+            h.setCursor(Qt.CursorShape.SizeAllCursor)
+            h.setToolTip("拖动移动")
+        h.setProperty("abortable", on)
+        h.style().unpolish(h)
+        h.style().polish(h)
     
     def _abort_ai_processing(self):
         """一键终止 AI 处理"""
@@ -599,6 +607,7 @@ class CapsuleWidget(QWidget):
         self.ai_bubble = AIResultBubble()
         self.ai_bubble.closed.connect(self._on_bubble_closed)
         self.ai_bubble.followup_requested.connect(self._on_followup_requested)
+        self.ai_bubble.abort_requested.connect(self._abort_ai_processing)
         
         if not is_error and hasattr(self, '_current_image_data') and self._current_image_data:
             self.ai_bubble.set_image_data(self._current_image_data)
@@ -1070,7 +1079,11 @@ class CapsuleWidget(QWidget):
         self.drag_handle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # 使用 qtawesome 图标作为拖动手柄
         drag_icon = qta.icon('mdi6.drag-vertical', color='#888888')
-        self.drag_handle.setPixmap(drag_icon.pixmap(QSize(20, 20)))
+        self._handle_drag_pixmap = drag_icon.pixmap(QSize(20, 20))
+        self._handle_stop_pixmap = qta.icon('mdi6.stop', color=COLOR_ERROR).pixmap(QSize(ICON_LG, ICON_LG))
+        self._handle_abortable = False
+        self._handle_abort_ts = 0.0
+        self.drag_handle.setPixmap(self._handle_drag_pixmap)
         layout.addWidget(self.drag_handle)
 
         # 归档按钮
@@ -1092,10 +1105,16 @@ class CapsuleWidget(QWidget):
             child.setAcceptDrops(True)
             child.installEventFilter(self)
 
+        _ec = QColor(COLOR_ERROR)
+        _err_hover = f"rgba({_ec.red()}, {_ec.green()}, {_ec.blue()}, 0.12)"
+        _err_press = f"rgba({_ec.red()}, {_ec.green()}, {_ec.blue()}, 0.20)"
         self._normal_style = self._build_bg_css() + """
             #drag_handle {
                 background-color: transparent;
+                border-radius: %dpx;
             }
+            #drag_handle[abortable="true"]:hover { background-color: %s; }
+""" % (RADIUS_MD, _err_hover) + """
             QPushButton#btn_screenshot {
                 background-color: transparent;
                 border: none;
@@ -1446,9 +1465,22 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             self.reveal(animated=True)
     
     def _open_archive(self):
-
-        self.archive_window = WorkbenchWindow()
-        self.archive_window.show()
+        # 复用工作台窗口：关闭只是隐藏，再次打开秒开，已加载的缩略图不用重来
+        win = getattr(self, 'archive_window', None)
+        try:
+            if win is not None:
+                win.isVisible()  # C++ 对象已销毁时抛 RuntimeError
+        except RuntimeError:
+            win = None
+        if win is None:
+            win = WorkbenchWindow()
+            self.archive_window = win
+        if win.isMinimized():
+            win.showNormal()
+        else:
+            win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _open_settings(self):
         import traceback
@@ -1914,32 +1946,21 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
         pixmap.save(buf, "JPEG", 85)
         return buf.data().data()
 
+    def _container_border_style(self, color: str) -> str:
+        """在当前常规样式上只覆盖边框色：沿用外观设置的背景与圆角"""
+        return self._normal_style + f"""
+            #container {{ border: 2px solid {color}; }}"""
+
     def _set_drop_highlight(self, active: bool):
         """拖入时高亮胶囊边框"""
         if active:
-            self.container.setStyleSheet("""
-                #container {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 rgba(230, 243, 255, 0.98),
-                        stop:1 rgba(200, 225, 255, 0.95));
-                    border-radius: 20px;
-                    border: 2px solid #007aff;
-                }
-            """)
+            self.container.setStyleSheet(self._container_border_style(ACCENT_PRIMARY))
         else:
             self.container.setStyleSheet(self._normal_style)
 
     def _show_drop_feedback(self, count: int):
         """归档成功后短暂闪烁反馈"""
-        self.container.setStyleSheet("""
-            #container {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(220, 245, 220, 0.98),
-                    stop:1 rgba(200, 240, 210, 0.95));
-                border-radius: 20px;
-                border: 2px solid #34c759;
-            }
-        """)
+        self.container.setStyleSheet(self._container_border_style(COLOR_SUCCESS))
         QTimer.singleShot(600, lambda: self.container.setStyleSheet(self._normal_style))
 
     def eventFilter(self, obj, event):
@@ -1969,6 +1990,12 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             return super().eventFilter(obj, event)
         
         if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            # 终止形态下或刚通过手柄终止时，双击不触发归档（避免连点误开）
+            if self._handle_abortable or (
+                time.monotonic() - self._handle_abort_ts
+                < QApplication.doubleClickInterval() / 1000.0
+            ):
+                return True
             # 双击打开归档界面
             self._open_archive()
             return True
@@ -1996,10 +2023,20 @@ QPushButton#btn_screenshot:pressed { background-color: rgba(0, 0, 0, 0.12); }
             return True
         
         elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = getattr(self, '_is_dragging', False)
             # 恢复正常样式
-            if getattr(self, '_is_dragging', False):
+            if was_dragging:
                 self.container.setStyleSheet(self._normal_style)
                 self.setWindowOpacity(1.0)
+            
+            # 处理中：单击手柄（未拖动、松开仍在手柄内）终止 AI 任务
+            if (not was_dragging and self._handle_abortable
+                    and self.drag_handle.rect().contains(event.position().toPoint())):
+                self._handle_abort_ts = time.monotonic()
+                self._drag_offset = None
+                self._is_dragging = False
+                self._abort_ai_processing()
+                return True
             
             self._drag_offset = None
             self._is_dragging = False
